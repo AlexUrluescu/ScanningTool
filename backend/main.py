@@ -1,27 +1,110 @@
 # main.py
+"""FastAPI server for the document extraction API."""
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+
 from graph.builder import create_graph
+from tools.parser import parse_document_to_images
 
-def run_chat():
-    # 1. Initialize the graph
-    app = create_graph()
-    
-    # 2. Get user input
-    user_input = "Get post number 3 from JSONPlaceholder and show me the raw JSON."
+app = FastAPI(
+    title="Document Scanner API",
+    description="Upload invoices/receipts and extract structured data using AI vision",
+    version="1.0.0"
+)
 
-    # 3. Invoke the graph
-    result = app.invoke({"messages": [{"role": "user", "content": user_input}]})
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # 4. Print outputs
-    print("\n--- Full message trace ---")
-    for msg in result["messages"]:
-        role = getattr(msg, "type", "unknown")
-        print(f"\n[{role}]")
-        if hasattr(msg, "tool_calls") and msg.tool_calls:
-            print("tool_calls:", msg.tool_calls)
-        print(msg.content)
+graph = create_graph()
 
-    print("\n--- Final answer ---")
-    print(result["messages"][-1].content)
+SUPPORTED_TYPES = {
+    "application/pdf",
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/webp",
+}
 
-if __name__ == "__main__":
-    run_chat()
+MAX_FILE_SIZE = 10 * 1024 * 1024
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint."""
+    return {"status": "ok", "service": "document-scanner"}
+
+
+@app.get("/api/graph")
+async def get_graph_image():
+    """Returns the LangGraph architecture as a PNG image."""
+    try:
+        img_bytes = graph.get_graph().draw_mermaid_png()
+        return Response(content=img_bytes, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate graph image: {str(e)}"
+        )
+
+
+@app.post("/api/extract")
+async def extract_document(file: UploadFile = File(...)):
+    """Extract structured data from an uploaded invoice/receipt.
+
+    Accepts PDF, PNG, JPG, or WEBP files.
+    The vision model (qwen2.5vl:7b) processes images directly.
+    Returns JSON with extracted fields.
+    """
+    if file.content_type not in SUPPORTED_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file.content_type}. "
+                   f"Supported: PDF, PNG, JPG, WEBP"
+        )
+
+    file_bytes = await file.read()
+
+    if len(file_bytes) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)} MB"
+        )
+
+    try:
+        document_images = parse_document_to_images(file_bytes, file.content_type)
+    except Exception as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Failed to process document: {str(e)}"
+        )
+
+    if not document_images:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not extract any images from the document."
+        )
+
+    try:
+        result = graph.invoke({
+            "messages": [],
+            "document_images": document_images,
+            "extracted_data": None
+        })
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"AI extraction failed: {str(e)}"
+        )
+
+    extracted_data = result.get("extracted_data", {})
+
+    return {
+        "success": True,
+        "data": extracted_data,
+        "pages_processed": len(document_images),
+        "filename": file.filename
+    }
