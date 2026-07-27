@@ -1,5 +1,3 @@
-# tools/parser.py
-"""Document parsing utilities — converts PDF/images to base64 for the vision model."""
 import base64
 import io
 from PIL import Image
