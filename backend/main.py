@@ -2,7 +2,7 @@
 """FastAPI server for the document extraction API."""
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-
+import traceback
 from graph.builder import create_graph
 from tools.parser import parse_document_to_images
 
@@ -53,12 +53,8 @@ async def get_graph_image():
 
 @app.post("/api/extract")
 async def extract_document(file: UploadFile = File(...)):
-    """Extract structured data from an uploaded invoice/receipt.
 
-    Accepts PDF, PNG, JPG, or WEBP files.
-    The vision model (qwen2.5vl:7b) processes images directly.
-    Returns JSON with extracted fields.
-    """
+
     if file.content_type not in SUPPORTED_TYPES:
         raise HTTPException(
             status_code=400,
@@ -95,15 +91,18 @@ async def extract_document(file: UploadFile = File(...)):
             "extracted_data": None
         })
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(
             status_code=500,
             detail=f"AI extraction failed: {str(e)}"
         )
 
     extracted_data = result.get("extracted_data", {})
+    document_type = result.get("document_type", "UNKNOWN")
 
     return {
         "success": True,
+        "document_type": document_type,
         "data": extracted_data,
         "pages_processed": len(document_images),
         "filename": file.filename

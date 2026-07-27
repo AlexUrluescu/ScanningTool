@@ -1,147 +1,35 @@
-
-"""LangGraph nodes for the invoice extraction pipeline."""
 import json
 import re
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage
 from core.state import State
-from prompts.index import EXTRACTION_PROMPT, CLASSIFICATION_PROMPT, CV_EXTRACTION_PROMPT
+from prompts.index import ONBOARDING_EXTRACTION_PROMPT, CLASSIFICATION_PROMPT
+import re as _re
 
 llm = ChatOllama(model="qwen2.5vl:7b", temperature=0)
 
-def extract_invoice_data(state: State) -> dict:
-    """Extract structured invoice data from document images using the vision model."""
-    document_images = state.get("document_images", [])
 
-    if not document_images:
-        return {
-            "extracted_data": {
-                "error": "No images could be extracted from the document.",
-                "vendor_name": "",
-                "vendor_address": "",
-                "invoice_number": "",
-                "date": "",
-                "due_date": "",
-                "subtotal": None,
-                "tax": None,
-                "total": None,
-                "currency": "",
-                "items": [],
-                "payment_method": "",
-                "notes": ""
-            },
-            "messages": state.get("messages", [])
-        }
-
-    content = [{"type": "text", "text": EXTRACTION_PROMPT}]
-
-    for img_b64 in document_images:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-        })
-
-    message = HumanMessage(content=content)
-    response = llm.invoke([message])
-    extracted = _parse_llm_json(response.content)
-
-    return {
-        "extracted_data": extracted,
-        "messages": state.get("messages", [])
-    }
+ONBOARDING_FIELDS = {
+    "firstName": "",
+    "lastName": "",
+    "email": "",
+    "phone": "",
+    "cnp": "",
+    "birthDate": "",
+    "address": "",
+    "city": "",
+    "postalCode": "",
+    "jobTitle": "",
+    "department": "",
+    "startDate": "",
+    "iban": "",
+    "emergencyContactName": "",
+    "emergencyContactPhone": "",
+}
 
 
-def extract_cv_data(state: State) -> dict:
-    """Extract structured CV data from document images using the vision model."""
-    document_images = state.get("document_images", [])
-
-    if not document_images:
-        return {
-            "extracted_data": {
-                "error": "No images could be extracted from the document."
-            }
-        }
-
-    content = [{"type": "text", "text": CV_EXTRACTION_PROMPT}]
-
-    for img_b64 in document_images:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
-        })
-
-    message = HumanMessage(content=content)
-    response = llm.invoke([message])
-    extracted = _parse_llm_json(response.content)
-
-    return {
-        "extracted_data": extracted,
-        "messages": state.get("messages", [])
-    }
-
-
-def validate_output(state: State) -> dict:
-    """Validate and clean up the extracted data."""
-    data = state.get("extracted_data", {})
-
-    if data is None:
-        data = {}
-
-    doc_type = state.get("document_type", "UNKNOWN")
-
-    if doc_type == "CV":
-        defaults = {
-            "name": "",
-            "email": "",
-            "phone": "",
-            "location": "",
-            "education": [],
-            "experience": [],
-            "skills": [],
-            "languages": []
-        }
-        for key, default_val in defaults.items():
-            if key not in data:
-                data[key] = default_val
-    else:
-        defaults = {
-            "vendor_name": "",
-            "vendor_address": "",
-            "invoice_number": "",
-            "date": "",
-            "due_date": "",
-            "subtotal": None,
-            "tax": None,
-            "total": None,
-            "currency": "",
-            "items": [],
-            "payment_method": "",
-            "notes": ""
-        }
-
-        for key, default_val in defaults.items():
-            if key not in data:
-                data[key] = default_val
-
-        if isinstance(data.get("items"), list):
-            cleaned_items = []
-            for item in data["items"]:
-                if isinstance(item, dict):
-                    cleaned_items.append({
-                        "description": item.get("description", ""),
-                        "quantity": item.get("quantity"),
-                        "unit_price": item.get("unit_price"),
-                        "amount": item.get("amount")
-                    })
-            data["items"] = cleaned_items
-
-    return {
-        "extracted_data": data,
-        "messages": state.get("messages", [])
-    }
-
-
-async def classify_document(state: State) -> dict:
+def classify_document(state: State) -> dict:
+    """Classify the uploaded document (ID card, CV, contract, or other)."""
     document_images = state.get("document_images", [])
 
     content = [{"type": "text", "text": CLASSIFICATION_PROMPT}]
@@ -160,6 +48,79 @@ async def classify_document(state: State) -> dict:
         "document_type": extracted.get("type", "UNKNOWN"),
         "messages": state.get("messages", [])
     }
+
+
+def extract_onboarding_data(state: State) -> dict:
+    """Extract onboarding form fields from any document type."""
+    document_images = state.get("document_images", [])
+
+    if not document_images:
+        return {
+            "extracted_data": {**ONBOARDING_FIELDS, "error": "No images could be extracted from the document."},
+            "messages": state.get("messages", [])
+        }
+
+    content = [{"type": "text", "text": ONBOARDING_EXTRACTION_PROMPT}]
+
+    for img_b64 in document_images:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/png;base64,{img_b64}"}
+        })
+
+    message = HumanMessage(content=content)
+    response = llm.invoke([message])
+    extracted = _parse_llm_json(response.content)
+
+    return {
+        "extracted_data": extracted,
+        "messages": state.get("messages", [])
+    }
+
+
+def validate_output(state: State) -> dict:
+    """Validate and normalise extracted onboarding data."""
+    data = state.get("extracted_data", {})
+
+    if data is None:
+        data = {}
+
+    for key, default_val in ONBOARDING_FIELDS.items():
+        if key not in data or data[key] is None:
+            data[key] = default_val
+        else:
+            data[key] = str(data[key]).strip()
+
+    cnp = data.get("cnp", "")
+    if cnp and (len(cnp) != 13 or not cnp.isdigit()):
+        match = re.search(r"\d{13}", cnp)
+        data["cnp"] = match.group() if match else ""
+
+    for date_key in ("birthDate", "startDate"):
+        date_val = data.get(date_key, "")
+        if date_val:
+            data[date_key] = _normalise_date(date_val)
+
+    return {
+        "extracted_data": data,
+        "messages": state.get("messages", [])
+    }
+
+
+def _normalise_date(value: str) -> str:
+    """Try to parse various date formats into YYYY-MM-DD."""
+
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        return value
+
+    m = _re.match(r"^(\d{1,2})[./](\d{1,2})[./](\d{4})$", value)
+    if m:
+        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+
+    m = _re.match(r"^(\d{1,2})-(\d{1,2})-(\d{4})$", value)
+    if m:
+        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+    return value
 
 
 def _parse_llm_json(content: str) -> dict:
@@ -187,16 +148,5 @@ def _parse_llm_json(content: str) -> dict:
     return {
         "error": "Failed to parse LLM response as JSON",
         "raw_response": content[:500],
-        "vendor_name": "",
-        "vendor_address": "",
-        "invoice_number": "",
-        "date": "",
-        "due_date": "",
-        "subtotal": None,
-        "tax": None,
-        "total": None,
-        "currency": "",
-        "items": [],
-        "payment_method": "",
-        "notes": ""
+        **ONBOARDING_FIELDS,
     }
