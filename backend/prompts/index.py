@@ -1,69 +1,48 @@
-EXTRACTION_PROMPT = """You are an expert document data extractor. Look at the provided invoice/receipt image(s) carefully and extract all relevant information.
-
-Extract the following fields and return them as a valid JSON object. If a field is not found in the document, use null for numbers and empty string "" for text fields.
-
-Return ONLY a valid JSON object with these exact keys:
-{{
-  "vendor_name": "Company or seller name",
-  "vendor_address": "Seller's full address",
-  "invoice_number": "Invoice or receipt number",
-  "date": "Invoice date in YYYY-MM-DD format if possible",
-  "due_date": "Payment due date in YYYY-MM-DD format if possible",
-  "subtotal": 0.00,
-  "tax": 0.00,
-  "total": 0.00,
-  "currency": "Currency code like USD, EUR, RON",
-  "items": [
-    {{
-      "description": "Item description",
-      "quantity": 1,
-      "unit_price": 0.00,
-      "amount": 0.00
-    }}
-  ],
-  "payment_method": "Payment method if mentioned",
-  "notes": "Any additional notes or comments"
-}}
-
-IMPORTANT: Return ONLY the JSON object. No explanations, no markdown, no code blocks. Just pure JSON."""
-
-
 CLASSIFICATION_PROMPT = """You are a document classification expert. Look at the provided document image(s) carefully and determine the type of document.
 
-Return ONLY a valid JSON object with these exact keys:
+Possible types:
+- ID_CARD: National ID card (carte de identitate / buletin), passport, or driving license
+- CV: Curriculum vitae or resume
+- CONTRACT: Employment contract or job offer letter
+- OTHER: Any other document type
+
+Return ONLY a valid JSON object with this exact key:
 {{
-  "type": "INVOICE" | "RECEIPT" | "CV" | "OTHER"
+  "type": "ID_CARD" | "CV" | "CONTRACT" | "OTHER"
 }}
 
 IMPORTANT: Return ONLY the JSON object. No explanations, no markdown, no code blocks. Just pure JSON."""
 
-CV_EXTRACTION_PROMPT = """You are an expert CV data extractor. Look at the provided CV image(s) carefully and extract all relevant information.
 
-Extract the following fields and return them as a valid JSON object. If a field is not found in the document, use null for numbers and empty string "" for text fields.
+ONBOARDING_EXTRACTION_PROMPT = """You are an expert data extractor for employee onboarding. You are given one or more images of a document (ID card, CV, employment contract, or similar).
+
+Your task: extract as many of the following onboarding fields as possible from the document. If a field cannot be found, use an empty string "".
 
 Return ONLY a valid JSON object with these exact keys:
 {{
-  "name": "Candidate's full name",
-  "email": "Candidate's email address",
-  "phone": "Candidate's phone number",
-  "location": "Candidate's location",
-  "education": [
-    {{
-      "institution": "University/School name",
-      "degree": "Degree obtained",
-      "years": "Years attended"
-    }}
-  ],
-  "experience": [
-    {{
-      "company": "Company name",
-      "role": "Job title",
-      "years": "Years worked",
-      "description": "Brief description of responsibilities"
-    }}
-  ],
-  "skills": ["List of skills"],
-  "languages": ["List of languages"]
+  "firstName": "Person's first name (prenume)",
+  "lastName": "Person's last name (nume de familie)",
+  "email": "Email address",
+  "phone": "Phone number",
+  "cnp": "CNP (Romanian personal numeric code, 13 digits)",
+  "birthDate": "Date of birth in YYYY-MM-DD format",
+  "address": "Full street address",
+  "city": "City / locality",
+  "postalCode": "Postal code",
+  "jobTitle": "Job title / position",
+  "department": "Department",
+  "startDate": "Employment start date in YYYY-MM-DD format",
+  "iban": "IBAN bank account number",
+  "emergencyContactName": "Emergency contact full name",
+  "emergencyContactPhone": "Emergency contact phone number"
 }}
+
+Guidelines:
+- For ID cards (carte de identitate): extract firstName, lastName, cnp, birthDate, address, city. The CNP is a 13-digit number. The birth date can also be derived from the first 7 digits of the CNP (format: SAAMMZZ).
+- For CVs: extract firstName, lastName, email, phone, address, city, jobTitle (most recent or desired role).
+- For employment contracts: extract firstName, lastName, jobTitle, department, startDate, iban, and any other available fields.
+- Always try to extract as many fields as possible regardless of document type.
+- For Romanian names, "Prenume" = firstName, "Nume" / "Nume de familie" = lastName.
+- If the document is in Romanian, translate field values only where it makes sense (e.g., keep names, addresses as-is).
 
 IMPORTANT: Return ONLY the JSON object. No explanations, no markdown, no code blocks. Just pure JSON."""
