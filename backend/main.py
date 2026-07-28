@@ -1,5 +1,3 @@
-# main.py
-"""FastAPI server for the document extraction API."""
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 import traceback
