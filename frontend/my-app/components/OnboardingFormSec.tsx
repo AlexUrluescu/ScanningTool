@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useRef } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -42,10 +42,12 @@ const EMPTY_DATA: OnboardingData = {
 
 const FIELD_SECTIONS: {
   title: string;
+  icon: string;
   fields: { key: keyof OnboardingData; label: string; type?: string }[];
 }[] = [
   {
     title: "Date personale",
+    icon: "",
     fields: [
       { key: "firstName", label: "Prenume" },
       { key: "lastName", label: "Nume" },
@@ -57,6 +59,7 @@ const FIELD_SECTIONS: {
   },
   {
     title: "Adresă",
+    icon: "",
     fields: [
       { key: "address", label: "Adresă" },
       { key: "city", label: "Oraș" },
@@ -65,6 +68,7 @@ const FIELD_SECTIONS: {
   },
   {
     title: "Date angajare",
+    icon: "",
     fields: [
       { key: "jobTitle", label: "Funcție" },
       { key: "department", label: "Departament" },
@@ -74,6 +78,7 @@ const FIELD_SECTIONS: {
   },
   {
     title: "Contact de urgență",
+    icon: "",
     fields: [
       { key: "emergencyContactName", label: "Nume contact" },
       { key: "emergencyContactPhone", label: "Telefon contact", type: "tel" },
@@ -86,10 +91,19 @@ export default function OnboardingFormSec() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiFileName, setAiFileName] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [documentType, setDocumentType] = useState<string | null>(null);
+
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewType, setPreviewType] = useState<"image" | "pdf" | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   const handleFieldChange = useCallback(
     (key: keyof OnboardingData, value: string) => {
@@ -107,18 +121,30 @@ export default function OnboardingFormSec() {
       const file = e.target.files?.[0];
       if (!file) return;
 
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      const blobUrl = URL.createObjectURL(file);
+      setPreviewUrl(blobUrl);
+      setPreviewType(file.type === "application/pdf" ? "pdf" : "image");
+
       setAiFileName(file.name);
       setAiError(null);
       setIsExtracting(true);
+      setDocumentType(null);
 
       try {
         const formData = new FormData();
         formData.append("file", file);
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5 * 60 * 1000);
+
         const response = await fetch(`${API_URL}/api/extract`, {
           method: "POST",
           body: formData,
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => null);
@@ -129,8 +155,14 @@ export default function OnboardingFormSec() {
 
         const result = await response.json();
 
+        console.log("AI extraction result:", result);
+
         if (!result.success || !result.data) {
           throw new Error("Format de răspuns neașteptat de la server");
+        }
+
+        if (result.document_type) {
+          setDocumentType(result.document_type);
         }
 
         setData((prev) => {
@@ -151,11 +183,10 @@ export default function OnboardingFormSec() {
         setAiError(message);
       } finally {
         setIsExtracting(false);
-
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     },
-    [],
+    [previewUrl],
   );
 
   const handleReset = useCallback(() => {
@@ -163,88 +194,142 @@ export default function OnboardingFormSec() {
     setAiError(null);
     setAiFileName(null);
     setSubmitSuccess(false);
-  }, []);
+    setDocumentType(null);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+    setPreviewType(null);
+  }, [previewUrl]);
 
-  return (
-    <div
-      style={{
-        maxWidth: "760px",
-        width: "100%",
-        margin: "0 auto",
-        padding: "2rem 1.5rem 3rem",
-        display: "flex",
-        flexDirection: "column",
-        gap: "1.5rem",
-      }}
-    >
-      <div style={{ textAlign: "center" }}>
-        <h1
-          style={{
-            fontSize: "1.6rem",
-            fontWeight: 700,
-            margin: "0 0 0.5rem 0",
-            background:
-              "linear-gradient(135deg, var(--foreground) 0%, var(--color-primary) 100%)",
-            WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
-          }}
-        >
-          Onboarding angajat nou
-        </h1>
-        <p
-          style={{
-            color: "var(--foreground-secondary)",
-            margin: 0,
-            fontSize: "0.95rem",
-          }}
-        >
-          Completează manual, sau atașează un document (CI, contract, CV) și
-          lasă AI-ul să completeze câmpurile pentru tine.
-        </p>
-      </div>
+  const hasPreview = previewUrl !== null;
 
-      <div
-        className="glass-card"
-        style={{
-          padding: "1.25rem",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          flexWrap: "wrap",
-          gap: "1rem",
-        }}
-      >
+  const docTypeLabels: Record<string, string> = {
+    ID_CARD: "🪪 Carte de identitate",
+    CV: "📄 CV / Rezumat",
+    CONTRACT: "📝 Contract",
+    OTHER: "📎 Document",
+    UNKNOWN: "📎 Document",
+  };
+
+  const previewPanel = hasPreview && (
+    <div className="preview-panel glass-card">
+      <div className="preview-header">
         <div
-          style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.5rem",
+            minWidth: 0,
+          }}
         >
-          <span style={{ fontWeight: 600 }}>🤖 Completează automat cu AI</span>
-          <span
-            style={{ fontSize: "0.8rem", color: "var(--foreground-muted)" }}
-          >
-            {aiFileName
-              ? `Ultimul fișier folosit: ${aiFileName}`
-              : "Acceptă PDF, JPG sau PNG"}
+          <span style={{ fontSize: "1.1rem", flexShrink: 0 }}>
+            {previewType === "pdf" ? "📄" : "🖼️"}
           </span>
+          <span className="preview-filename">{aiFileName}</span>
         </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".pdf,image/*"
-          onChange={handleFileSelected}
-          style={{ display: "none" }}
-        />
-
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={handleUseAiClick}
-          disabled={isExtracting}
-          style={{ minWidth: "160px" }}
-        >
-          {isExtracting ? "Se procesează…" : "✨ Use AI"}
-        </button>
+        {documentType && (
+          <span className="badge badge-success">
+            {docTypeLabels[documentType] || documentType}
+          </span>
+        )}
       </div>
+
+      <div className="preview-content">
+        {previewType === "pdf" ? (
+          <object
+            data={previewUrl}
+            type="application/pdf"
+            width="100%"
+            height="450px"
+            style={{ borderRadius: "var(--radius-sm)", background: "orange" }}
+          >
+            <p
+              style={{
+                padding: "2rem",
+                textAlign: "center",
+                color: "var(--foreground-muted)",
+              }}
+            >
+              Browserul nu poate afișa PDF-ul.{" "}
+              <a
+                href={previewUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--color-primary)" }}
+              >
+                Deschide într-un tab nou
+              </a>
+            </p>
+          </object>
+        ) : (
+          <img
+            src={previewUrl}
+            alt="Document preview"
+            className="preview-image"
+          />
+        )}
+      </div>
+
+      <button
+        type="button"
+        className="btn btn-ghost"
+        onClick={handleUseAiClick}
+        disabled={isExtracting}
+        style={{ width: "100%", marginTop: "0.5rem", fontSize: "0.8rem" }}
+      >
+        Înlocuiește documentul
+      </button>
+    </div>
+  );
+
+  const formPanel = (
+    <div className="form-panel">
+      {!hasPreview && (
+        <div
+          className="glass-card"
+          style={{
+            padding: "1.25rem",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: "1rem",
+          }}
+        >
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
+          >
+            <span style={{ fontWeight: 600 }}>Completează automat cu AI</span>
+            <span
+              style={{ fontSize: "0.8rem", color: "var(--foreground-muted)" }}
+            >
+              Acceptă PDF, JPG sau PNG
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleUseAiClick}
+            disabled={isExtracting}
+            style={{ minWidth: "160px" }}
+          >
+            {isExtracting ? "Se procesează…" : "Use AI"}
+          </button>
+        </div>
+      )}
+
+      {isExtracting && (
+        <div
+          className="glass-card animate-slide-up"
+          style={{ padding: "1.5rem", textAlign: "center" }}
+        >
+          <div
+            className="processing-spinner"
+            style={{ margin: "0 auto 1rem" }}
+          />
+          <p className="processing-label">AI-ul analizează documentul…</p>
+        </div>
+      )}
 
       {aiError && (
         <div
@@ -276,52 +361,25 @@ export default function OnboardingFormSec() {
           className="glass-card"
           style={{ padding: "1.25rem" }}
         >
-          <h2
-            style={{
-              fontSize: "1rem",
-              fontWeight: 600,
-              margin: "0 0 1rem 0",
-              color: "var(--foreground)",
-            }}
-          >
-            {section.title}
-          </h2>
+          <div className="section-header">
+            <div className="section-icon">{section.icon}</div>
+            <h2 className="section-title">{section.title}</h2>
+          </div>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
               gap: "1rem",
             }}
           >
             {section.fields.map((field) => (
-              <label
-                key={field.key}
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "0.35rem",
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: "0.8rem",
-                    color: "var(--foreground-secondary)",
-                  }}
-                >
-                  {field.label}
-                </span>
+              <label key={field.key} className="form-group">
+                <span className="form-label">{field.label}</span>
                 <input
                   type={field.type || "text"}
+                  className="form-input"
                   value={data[field.key]}
                   onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                  style={{
-                    padding: "0.6rem 0.75rem",
-                    borderRadius: "8px",
-                    border: "1px solid var(--border-color)",
-                    background: "var(--background)",
-                    color: "var(--foreground)",
-                    fontSize: "0.9rem",
-                  }}
                 />
               </label>
             ))}
@@ -332,9 +390,64 @@ export default function OnboardingFormSec() {
       <div
         style={{ display: "flex", gap: "0.75rem", justifyContent: "center" }}
       >
+        <button className="btn btn-primary">Continue</button>
         <button type="button" className="btn btn-ghost" onClick={handleReset}>
           Resetează
         </button>
+      </div>
+    </div>
+  );
+
+  const hiddenInput = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept=".pdf,image/*"
+      onChange={handleFileSelected}
+      style={{ display: "none" }}
+    />
+  );
+
+  return (
+    <div style={{ width: "100%", padding: "2rem 1.5rem 3rem" }}>
+      {hiddenInput}
+
+      <div
+        style={{
+          textAlign: "center",
+          marginBottom: "1.5rem",
+          maxWidth: "760px",
+          margin: "0 auto 1.5rem",
+        }}
+      >
+        <h1
+          style={{
+            fontSize: "1.6rem",
+            fontWeight: 700,
+            margin: "0 0 0.5rem 0",
+            background:
+              "linear-gradient(135deg, var(--foreground) 0%, var(--color-primary) 100%)",
+            WebkitBackgroundClip: "text",
+            WebkitTextFillColor: "transparent",
+          }}
+        >
+          Onboarding angajat nou
+        </h1>
+        <p
+          style={{
+            color: "var(--foreground-secondary)",
+            margin: 0,
+            fontSize: "0.95rem",
+          }}
+        >
+          Completează manual, sau atașează un document (CI, contract, CV) și
+          lasă AI-ul să completeze câmpurile pentru tine.
+        </p>
+      </div>
+
+      <div className={hasPreview ? "split-layout" : "single-layout"}>
+        {previewPanel}
+        {formPanel}
       </div>
     </div>
   );
