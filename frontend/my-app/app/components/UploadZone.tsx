@@ -156,7 +156,7 @@ export default function UploadZone({
                   color: "var(--foreground)",
                   margin: 0,
                 }}>
-                  Drop your invoice here
+                  Drop your document here
                 </p>
                 <p style={{
                   fontSize: "0.875rem",

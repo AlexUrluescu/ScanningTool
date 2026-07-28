@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DocScan AI — Invoice & Receipt Scanner",
+  title: "OnboardAI — Smart Employee Onboarding",
   description:
-    "Upload invoices and receipts to automatically extract vendor info, amounts, line items, and more using AI powered by LangGraph and Llama.",
+    "Upload ID cards, CVs, or contracts to automatically extract employee data using AI powered by LangGraph and Ollama.",
 };
 
 export default function RootLayout({

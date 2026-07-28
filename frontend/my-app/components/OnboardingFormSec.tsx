@@ -46,42 +46,42 @@ const FIELD_SECTIONS: {
   fields: { key: keyof OnboardingData; label: string; type?: string }[];
 }[] = [
   {
-    title: "Date personale",
+    title: "Personal Details",
     icon: "",
     fields: [
-      { key: "firstName", label: "Prenume" },
-      { key: "lastName", label: "Nume" },
+      { key: "firstName", label: "First Name" },
+      { key: "lastName", label: "Last Name" },
       { key: "email", label: "Email", type: "email" },
-      { key: "phone", label: "Telefon", type: "tel" },
+      { key: "phone", label: "Phone", type: "tel" },
       { key: "cnp", label: "CNP" },
-      { key: "birthDate", label: "Data nașterii", type: "date" },
+      { key: "birthDate", label: "Date of Birth", type: "date" },
     ],
   },
   {
-    title: "Adresă",
+    title: "Address",
     icon: "",
     fields: [
-      { key: "address", label: "Adresă" },
-      { key: "city", label: "Oraș" },
-      { key: "postalCode", label: "Cod poștal" },
+      { key: "address", label: "Address" },
+      { key: "city", label: "City" },
+      { key: "postalCode", label: "Postal Code" },
     ],
   },
   {
-    title: "Date angajare",
+    title: "Employment Details",
     icon: "",
     fields: [
-      { key: "jobTitle", label: "Funcție" },
-      { key: "department", label: "Departament" },
-      { key: "startDate", label: "Data angajării", type: "date" },
+      { key: "jobTitle", label: "Job Title" },
+      { key: "department", label: "Department" },
+      { key: "startDate", label: "Start Date", type: "date" },
       { key: "iban", label: "IBAN" },
     ],
   },
   {
-    title: "Contact de urgență",
+    title: "Emergency Contact",
     icon: "",
     fields: [
-      { key: "emergencyContactName", label: "Nume contact" },
-      { key: "emergencyContactPhone", label: "Telefon contact", type: "tel" },
+      { key: "emergencyContactName", label: "Contact Name" },
+      { key: "emergencyContactPhone", label: "Contact Phone", type: "tel" },
     ],
   },
 ];
@@ -158,7 +158,7 @@ export default function OnboardingFormSec() {
         console.log("AI extraction result:", result);
 
         if (!result.success || !result.data) {
-          throw new Error("Format de răspuns neașteptat de la server");
+          throw new Error("Unexpected response format from server");
         }
 
         if (result.document_type) {
@@ -179,7 +179,7 @@ export default function OnboardingFormSec() {
         });
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : "A apărut o eroare neașteptată";
+          err instanceof Error ? err.message : "An unexpected error occurred";
         setAiError(message);
       } finally {
         setIsExtracting(false);
@@ -203,8 +203,8 @@ export default function OnboardingFormSec() {
   const hasPreview = previewUrl !== null;
 
   const docTypeLabels: Record<string, string> = {
-    ID_CARD: "🪪 Carte de identitate",
-    CV: "📄 CV / Rezumat",
+    ID_CARD: "🪪 ID Card",
+    CV: "📄 CV / Resume",
     CONTRACT: "📝 Contract",
     OTHER: "📎 Document",
     UNKNOWN: "📎 Document",
@@ -249,14 +249,14 @@ export default function OnboardingFormSec() {
                 color: "var(--foreground-muted)",
               }}
             >
-              Browserul nu poate afișa PDF-ul.{" "}
+              Your browser cannot display the PDF.{" "}
               <a
                 href={previewUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 style={{ color: "var(--color-primary)" }}
               >
-                Deschide într-un tab nou
+                Open in a new tab
               </a>
             </p>
           </object>
@@ -276,7 +276,7 @@ export default function OnboardingFormSec() {
         disabled={isExtracting}
         style={{ width: "100%", marginTop: "0.5rem", fontSize: "0.8rem" }}
       >
-        Înlocuiește documentul
+        Replace document
       </button>
     </div>
   );
@@ -298,11 +298,11 @@ export default function OnboardingFormSec() {
           <div
             style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
           >
-            <span style={{ fontWeight: 600 }}>Completează automat cu AI</span>
+            <span style={{ fontWeight: 600 }}>Auto-fill with AI</span>
             <span
               style={{ fontSize: "0.8rem", color: "var(--foreground-muted)" }}
             >
-              Acceptă PDF, JPG sau PNG
+              Accepts PDF, JPG or PNG
             </span>
           </div>
 
@@ -313,7 +313,7 @@ export default function OnboardingFormSec() {
             disabled={isExtracting}
             style={{ minWidth: "160px" }}
           >
-            {isExtracting ? "Se procesează…" : "Use AI"}
+            {isExtracting ? "Processing…" : "Use AI"}
           </button>
         </div>
       )}
@@ -327,7 +327,7 @@ export default function OnboardingFormSec() {
             className="processing-spinner"
             style={{ margin: "0 auto 1rem" }}
           />
-          <p className="processing-label">AI-ul analizează documentul…</p>
+          <p className="processing-label">AI is analyzing your document…</p>
         </div>
       )}
 
@@ -350,7 +350,7 @@ export default function OnboardingFormSec() {
           style={{ padding: "1rem", borderColor: "rgba(74, 222, 128, 0.3)" }}
         >
           <p style={{ margin: 0, fontWeight: 600 }}>
-            ✓ Datele de onboarding au fost trimise cu succes.
+            ✓ Onboarding data submitted successfully.
           </p>
         </div>
       )}
@@ -392,7 +392,7 @@ export default function OnboardingFormSec() {
       >
         <button className="btn btn-primary">Continue</button>
         <button type="button" className="btn btn-ghost" onClick={handleReset}>
-          Resetează
+          Reset
         </button>
       </div>
     </div>
@@ -431,7 +431,7 @@ export default function OnboardingFormSec() {
             WebkitTextFillColor: "transparent",
           }}
         >
-          Onboarding angajat nou
+          New Employee Onboarding
         </h1>
         <p
           style={{
@@ -440,8 +440,8 @@ export default function OnboardingFormSec() {
             fontSize: "0.95rem",
           }}
         >
-          Completează manual, sau atașează un document (CI, contract, CV) și
-          lasă AI-ul să completeze câmpurile pentru tine.
+          Fill in manually, or upload a document (ID card, contract, CV) and
+          let the AI auto-fill the fields for you.
         </p>
       </div>
 
