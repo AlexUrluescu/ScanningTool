@@ -104,6 +104,7 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
         result = graph.invoke({
             "documents": all_document_images,
             "extracted_texts": [],
+            "extracted_transactions": [],
             "current_doc_index": 0,
             "report": "",
             "company_name": "Nexus Digital",

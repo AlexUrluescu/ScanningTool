@@ -2,19 +2,20 @@
 import base64
 import io
 import re
+import threading
 from collections import Counter
 from typing import Optional
 from PIL import Image
 from paddleocr import PaddleOCR
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage
-from core.state import FinancialState, ExtractionResult
+from core.state import FinancialState, DocumentInput, ExtractionResult
 from prompts.index import FINANCIAL_EXTRACTION_PROMPT
 
 ocr = PaddleOCR(lang="en")
+_ocr_lock = threading.Lock() 
 llm = ChatOllama(model="qwen2.5:7b", temperature=0)
 
-# Matches dd.mm.yyyy, dd/mm/yyyy, yyyy-mm-dd, etc. at the start of a line
 _DATE_LINE_RE = re.compile(r"^\s*\d{1,4}[./-]\d{1,2}[./-]\d{1,4}")
 
 
@@ -45,16 +46,11 @@ def merge_continuation_lines(lines_text: list[str]) -> list[str]:
     return merged
 
 
-def extract_ocr(state: FinancialState) -> dict:
-    """Extract text from the current document using PaddleOCR and rebuild tables."""
-    documents = state["documents"]
-    index = state["current_doc_index"]
-    extracted_texts = list(state.get("extracted_texts", []))
-
-    if index >= len(documents):
-        return {"extracted_texts": extracted_texts}
-
-    img_b64 = documents[index]
+def _run_ocr_on_image(img_b64: str, doc_index: int, total_docs: int) -> str:
+    """Run PaddleOCR on a single base64-encoded image and return structured text.
+    
+    This is the core OCR logic extracted from extract_ocr, untouched.
+    """
     img_bytes = base64.b64decode(img_b64)
     image = Image.open(io.BytesIO(img_bytes))
     if image.mode != "RGB":
@@ -62,11 +58,12 @@ def extract_ocr(state: FinancialState) -> dict:
 
     import numpy as np
     img_array = np.array(image)
-    img_array = img_array[:, :, ::-1]  # RGB → BGR
+    img_array = img_array[:, :, ::-1]
 
-    result = ocr.ocr(img_array)
+    with _ocr_lock:
+        result = ocr.ocr(img_array)
 
-    items = []  # (y_center, x_center, text)
+    items = [] 
 
     if result and result[0]:
         res = result[0]
@@ -109,27 +106,18 @@ def extract_ocr(state: FinancialState) -> dict:
         row.sort(key=lambda item: item[0])
         lines_text.append(" | ".join(item[1] for item in row))
 
-    # NOU: unește liniile de continuare (fără dată la început) în rândul de tranzacție anterior
     lines_text = merge_continuation_lines(lines_text)
 
     page_text = "\n".join(lines_text)
-    doc_label = f"--- Document {index + 1} / {len(documents)} ---"
-    extracted_texts.append(f"{doc_label}\n{page_text}")
+    doc_label = f"--- Document {doc_index + 1} / {total_docs} ---"
+    full_text = f"{doc_label}\n{page_text}"
 
-    print(f"[OCR] Processed document {index + 1}/{len(documents)} — {len(lines_text)} rows reconstructed")
-
-    return {"extracted_texts": extracted_texts}
+    print(f"[OCR] Processed document {doc_index + 1}/{total_docs} — {len(lines_text)} rows reconstructed")
+    return full_text
 
 
 def _build_company_context(company_name: Optional[str], company_cif: Optional[str]) -> str:
-    """Construiește un bloc de context despre compania principală, injectat în prompt.
-
-    Rol strict informativ: ajută LLM-ul să recunoască mai ușor una dintre cele
-    două părți ale facturii chiar dacă textul OCR e zgomotos sau numele apare
-    scris diferit. NU e o instrucțiune de clasificare — promptul interzice
-    explicit LLM-ului să decidă debit/credit pe baza acestui context; decizia
-    rămâne strict a codului determinist (resolve_invoice_directions).
-    """
+    """Build a context block about the main company, injected into the prompt."""
     if not company_name and not company_cif:
         return ""
     parts = []
@@ -146,21 +134,13 @@ def _build_company_context(company_name: Optional[str], company_cif: Optional[st
     )
 
 
-def extract_transactions(state: FinancialState) -> dict:
-    """Extract structured transactions from the latest OCR text."""
-    extracted_texts = state.get("extracted_texts", [])
-    extracted_transactions = list(state.get("extracted_transactions", []))
-    index = state["current_doc_index"]
-
-    if not extracted_texts or index >= len(state["documents"]):
-        return {"current_doc_index": index + 1}
-
-    latest_text = extracted_texts[-1]
-    company_context = _build_company_context(
-        state.get("company_name"), state.get("company_cif")
-    )
-
-    prompt = FINANCIAL_EXTRACTION_PROMPT.format(text=latest_text, company_context=company_context)
+def _run_extraction_on_text(text: str, doc_index: int, company_name: Optional[str], company_cif: Optional[str]) -> list:
+    """Run LLM structured extraction on OCR text. Returns list of Transaction objects.
+    
+    This is the core extraction logic from extract_transactions, untouched.
+    """
+    company_context = _build_company_context(company_name, company_cif)
+    prompt = FINANCIAL_EXTRACTION_PROMPT.format(text=text, company_context=company_context)
     message = HumanMessage(content=prompt)
 
     structured_llm = llm.with_structured_output(ExtractionResult)
@@ -168,23 +148,48 @@ def extract_transactions(state: FinancialState) -> dict:
     try:
         response = structured_llm.invoke([message])
         if response and response.transactions:
-            extracted_transactions.extend(response.transactions)
-            print(f"[LLM] Extracted {len(response.transactions)} transactions from document {index + 1}")
+            print(f"[LLM] Extracted {len(response.transactions)} transactions from document {doc_index + 1}")
+            return list(response.transactions)
         else:
-            print(f"[LLM] No transactions found in document {index + 1}")
+            print(f"[LLM] No transactions found in document {doc_index + 1}")
+            return []
     except Exception as e:
         print(f"[LLM] Error extracting transactions: {e}")
+        return []
+
+
+def process_document(state: DocumentInput) -> dict:
+    """Process a single document: OCR → LLM extraction.
+    
+    This node is called IN PARALLEL via Send() for each document.
+    It receives a DocumentInput (single doc), not the full FinancialState.
+    Returns partial state updates that get merged via operator.add reducers.
+    """
+    doc_b64 = state["doc_b64"]
+    doc_index = state["doc_index"]
+    total_docs = state["total_docs"]
+    company_name = state.get("company_name")
+    company_cif = state.get("company_cif")
+
+    print(f"\n[DEBUG-START] processing doc_index={doc_index+1}/{total_docs}, base64_len={len(doc_b64)}")
+
+    extracted_text = _run_ocr_on_image(doc_b64, doc_index, total_docs)
+    
+    print(f"[DEBUG-OCR] doc_index={doc_index+1}/{total_docs} OCR length: {len(extracted_text)} chars")
+    print(f"[DEBUG-OCR-PREVIEW] doc_index={doc_index+1}/{total_docs}: {repr(extracted_text[:150])}...")
+
+    transactions = _run_extraction_on_text(extracted_text, doc_index, company_name, company_cif)
+
+    print(f"[DEBUG-LLM] doc_index={doc_index+1}/{total_docs} extracted {len(transactions)} txs")
+    for i, t in enumerate(transactions):
+        print(f"  tx {i}: date={t.date} desc={t.description} debit={t.debit} credit={t.credit} total={t.total_amount}")
+
+    print(f"[DEBUG-END] finished doc_index={doc_index+1}/{total_docs}\n")
 
     return {
-        "extracted_transactions": extracted_transactions,
-        "current_doc_index": index + 1
+        "extracted_texts": [extracted_text],
+        "extracted_transactions": transactions,
     }
-
-
-def should_continue(state: FinancialState) -> str:
-    index = state["current_doc_index"]
-    total = len(state["documents"])
-    return "extract_ocr" if index < total else "generate_report"
 
 
 import dateutil.parser
@@ -213,8 +218,6 @@ def _normalize_cif(cif: Optional[str]) -> Optional[str]:
     return c[2:] if c.startswith("RO") else c
 
 
-# Sufixe legale care nu ajută la identificarea companiei și variază des în
-# formatare (cu/fără puncte, cu/fără spații) — le eliminăm înainte de comparație.
 _LEGAL_SUFFIXES = (
     "SRL", "SA", "PFA", "II", "IF", "SCS", "SCA", "SNC",
 )
@@ -230,11 +233,10 @@ def _normalize_name(name: Optional[str]) -> Optional[str]:
     """
     if not name:
         return None
-    # elimină diacritice (ă -> a, ș -> s etc.)
+    
     n = unicodedata.normalize("NFKD", name)
     n = "".join(c for c in n if not unicodedata.combining(c))
     n = n.upper()
-    # elimină orice caracter non-alfanumeric (punctuație, cratime etc.)
     n = re.sub(r"[^A-Z0-9\s]", " ", n)
     tokens = [t for t in n.split() if t and t not in _LEGAL_SUFFIXES]
     return " ".join(tokens) if tokens else None
@@ -302,8 +304,6 @@ def resolve_invoice_directions(
                 resolved_cif = top_cif
                 auto_detected = True
 
-        # Numele e folosit ca semnal de auto-detecție doar dacă CIF n-a găsit
-        # nimic recurent (CIF rămâne prioritar, fiind mai puțin ambiguu).
         if not resolved_cif and name_counter:
             top_name, count = name_counter.most_common(1)[0]
             if count >= 2:
@@ -312,7 +312,7 @@ def resolve_invoice_directions(
 
     for t in invoice_txs:
         if t.total_amount is None:
-            # Nimic de rezolvat dacă LLM-ul n-a extras suma totală
+
             t.direction_resolved = False
             continue
 
@@ -327,17 +327,17 @@ def resolve_invoice_directions(
                     (resolved_name and _names_match(client_name, resolved_name))
 
         if is_supplier and not is_client:
-            # Compania principală emite factura -> VENIT
+     
             t.credit = t.total_amount
             t.debit = None
             t.direction_resolved = True
         elif is_client and not is_supplier:
-            # Compania principală e facturată -> CHELTUIALĂ
+          
             t.debit = t.total_amount
             t.credit = None
             t.direction_resolved = True
         else:
-            # Fie nicio parte nu se potrivește, fie ambele (ambiguu) — nu ghicim.
+       
             t.debit = None
             t.credit = None
             t.direction_resolved = False
@@ -355,9 +355,6 @@ def generate_report(state: FinancialState) -> dict:
     if not txs:
         return {"report": "No transactions could be extracted from the uploaded documents."}
 
-    # NOU: rezolvare determinist a direcției facturilor (venit vs. cheltuială),
-    # pe baza CIF și/sau nume normalizat, ÎNAINTE de orice calcul de total.
-    # LLM-ul nu mai decide asta (vezi prompt).
     txs, resolved_cif, resolved_name, auto_detected = resolve_invoice_directions(
         txs, company_cif, company_name
     )
@@ -370,7 +367,7 @@ def generate_report(state: FinancialState) -> dict:
 
     for inv in invoice_txs:
         if not inv.direction_resolved:
-            continue  # nu potrivim facturi a căror direcție n-a putut fi stabilită
+            continue 
 
         inv_amt = inv.debit or inv.credit or 0.0
         inv_date = parse_date(inv.date)
@@ -388,8 +385,7 @@ def generate_report(state: FinancialState) -> dict:
                 inv.matched_invoice = True
                 break
 
-    # NOU: doar facturile cu direcție rezolvată intră în totaluri; cele
-    # neclasificate sunt excluse (nu ghicite) și semnalate separat mai jos.
+
     total_income = sum(t.credit or 0.0 for t in bank_txs) + \
         sum(t.credit or 0.0 for t in invoice_txs if t.direction_resolved and not t.matched_invoice)
     total_expenses = sum(t.debit or 0.0 for t in bank_txs) + \
@@ -406,14 +402,11 @@ def generate_report(state: FinancialState) -> dict:
 
     sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
 
-    # 4. Reconciliation logic (ONLY on Bank Statements)
     reconciliation_msg = ""
     valid_balances = [t for t in bank_txs if t.balance is not None]
     if len(valid_balances) >= 1:
         first_tx = valid_balances[0]
-        # Soldul de deschidere se derivă din soldul de DUPĂ prima tranzacție,
-        # anulând efectul acelei tranzacții — nu presupunem că avem un rând
-        # explicit "SOLD INIȚIAL" (a fost intenționat exclus ca rând de sumar).
+
         opening_balance = first_tx.balance - (first_tx.credit or 0.0) + (first_tx.debit or 0.0)
         final_balance = valid_balances[-1].balance
 

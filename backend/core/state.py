@@ -1,4 +1,5 @@
-from typing import TypedDict, Optional, Literal
+from typing import TypedDict, Optional, Literal, Annotated
+import operator
 from pydantic import BaseModel, Field
 
 CategoryType = Literal[
@@ -18,26 +19,35 @@ class Transaction(BaseModel):
         description="'STATEMENT' if from a bank statement, 'INVOICE' if from an invoice or receipt"
     )
     matched_invoice: bool = False
-
-    # NOU: pentru facturi, LLM extrage doar datele brute — nu decide venit/cheltuială
     total_amount: Optional[float] = None
     supplier_name: Optional[str] = None
     supplier_cif: Optional[str] = None
     client_name: Optional[str] = None
     client_cif: Optional[str] = None
-    direction_resolved: bool = False  # True doar dacă am putut stabili cu certitudine direcția
+    direction_resolved: bool = False 
 
 
 class ExtractionResult(BaseModel):
     transactions: list[Transaction]
 
 
+class DocumentInput(TypedDict):
+    """Input for a single parallel document processing branch.
+    Each Send() creates one of these."""
+    doc_b64: str
+    doc_index: int
+    total_docs: int
+    company_cif: Optional[str]
+    company_name: Optional[str]
+
+
 class FinancialState(TypedDict):
     documents: list[str]
-    extracted_texts: list[str]
-    extracted_transactions: list[Transaction]
+
+    extracted_texts: Annotated[list[str], operator.add]
+    extracted_transactions: Annotated[list, operator.add]
     current_doc_index: int
     report: str
-    # NOU: identitatea companiei pentru care se generează raportul (configurabil de utilizator)
+
     company_cif: Optional[str]
     company_name: Optional[str]
