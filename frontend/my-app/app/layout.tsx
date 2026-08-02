@@ -13,9 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "OnboardAI — Smart Employee Onboarding",
+  title: "FinanceAI — Smart Financial Reports",
   description:
-    "Upload ID cards, CVs, or contracts to automatically extract employee data using AI powered by LangGraph and Ollama.",
+    "Upload bank statements, invoices, and receipts to generate AI-powered financial reports using LangGraph, PaddleOCR, and Ollama.",
 };
 
 export default function RootLayout({

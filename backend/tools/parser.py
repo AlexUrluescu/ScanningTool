@@ -3,7 +3,7 @@ import io
 from PIL import Image
 import pypdfium2 as pdfium
 
-MAX_DIMENSION = 1024
+MAX_DIMENSION = 2048
 
 
 def _resize_if_needed(image: Image.Image) -> Image.Image:

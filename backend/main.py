@@ -1,13 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import traceback
 from graph.builder import create_graph
 from tools.parser import parse_document_to_images
 
 app = FastAPI(
-    title="Document Scanner API",
-    description="Upload invoices/receipts and extract structured data using AI vision",
-    version="1.0.0"
+    title="Financial Report AI",
+    description="Upload bank statements, invoices, and receipts to generate financial reports using AI",
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -28,12 +29,12 @@ SUPPORTED_TYPES = {
     "image/webp",
 }
 
-MAX_FILE_SIZE = 10 * 1024 * 1024
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
+
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "document-scanner"}
+    return {"status": "ok", "service": "financial-report-ai"}
 
 
 @app.get("/api/graph")
@@ -49,59 +50,76 @@ async def get_graph_image():
         )
 
 
-@app.post("/api/extract")
-async def extract_document(file: UploadFile = File(...)):
+@app.post("/api/report")
+async def generate_financial_report(files: List[UploadFile] = File(...)):
+    """Upload one or more financial documents and generate a report.
 
+    Accepts multiple PDF, PNG, JPG, or WEBP files.
+    Each file is OCR'd, then all texts are sent to the LLM
+    to generate a comprehensive financial report.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    if file.content_type not in SUPPORTED_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file.content_type}. "
-                   f"Supported: PDF, PNG, JPG, WEBP"
-        )
+    # Parse all uploaded files into base64 images
+    all_document_images: list[str] = []
+    filenames: list[str] = []
 
-    file_bytes = await file.read()
+    for file in files:
+        if file.content_type not in SUPPORTED_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported file type: {file.content_type} ({file.filename}). "
+                       f"Supported: PDF, PNG, JPG, WEBP"
+            )
 
-    if len(file_bytes) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)} MB"
-        )
+        file_bytes = await file.read()
 
-    try:
-        document_images = parse_document_to_images(file_bytes, file.content_type)
-    except Exception as e:
+        if len(file_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{file.filename}' too large. Maximum size is {MAX_FILE_SIZE // (1024*1024)} MB"
+            )
+
+        try:
+            images = parse_document_to_images(file_bytes, file.content_type)
+            all_document_images.extend(images)
+            filenames.append(file.filename)
+        except Exception as e:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Failed to process '{file.filename}': {str(e)}"
+            )
+
+    if not all_document_images:
         raise HTTPException(
             status_code=422,
-            detail=f"Failed to process document: {str(e)}"
+            detail="Could not extract any images from the uploaded documents."
         )
 
-    if not document_images:
-        raise HTTPException(
-            status_code=422,
-            detail="Could not extract any images from the document."
-        )
+    print(f"[API] Processing {len(files)} file(s), {len(all_document_images)} page(s) total")
 
+    # Invoke the LangGraph pipeline
     try:
         result = graph.invoke({
-            "messages": [],
-            "document_images": document_images,
-            "extracted_data": None
+            "documents": all_document_images,
+            "extracted_texts": [],
+            "current_doc_index": 0,
+            "report": "",
+            "company_name": "Nexus Digital",
+            "company_cif": "RO38492011",
         })
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(
             status_code=500,
-            detail=f"AI extraction failed: {str(e)}"
+            detail=f"Report generation failed: {str(e)}"
         )
-
-    extracted_data = result.get("extracted_data", {})
-    document_type = result.get("document_type", "UNKNOWN")
 
     return {
         "success": True,
-        "document_type": document_type,
-        "data": extracted_data,
-        "pages_processed": len(document_images),
-        "filename": file.filename
+        "report": result.get("report", ""),
+        "pages_processed": len(all_document_images),
+        "files": filenames,
+        "extracted_texts": result.get("extracted_texts", []),
     }

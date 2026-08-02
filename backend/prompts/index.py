@@ -1,48 +1,90 @@
-CLASSIFICATION_PROMPT = """You are a document classification expert. Look at the provided document image(s) carefully and determine the type of document.
+FINANCIAL_EXTRACTION_PROMPT = """You are a highly precise data extraction AI. You are given text extracted from a financial document (bank statement, invoice, or receipt).
+{company_context}
+Your task: Extract all individual financial transactions from the text and return them in a structured format.
 
-Possible types:
-- ID_CARD: National ID card (carte de identitate / buletin), passport, or driving license
-- CV: Curriculum vitae or resume
-- CONTRACT: Employment contract or job offer letter
-- OTHER: Any other document type
+CRITICAL INSTRUCTIONS:
 
-Return ONLY a valid JSON object with this exact key:
-{{
-  "type": "ID_CARD" | "CV" | "CONTRACT" | "OTHER"
-}}
+1. BANK STATEMENTS: Extract each individual transaction row (date, description, debit/credit, balance).
+   Do NOT extract summary rows: ignore any row containing "SOLD INIȚIAL", "SOLD FINAL",
+   "TOTAL ÎNCASĂRI", "TOTAL PLĂȚI" or similar opening/closing/aggregate labels — these repeat
+   the individual transactions below them and would double-count the totals.
+   IMPORTANT: every bank statement transaction row has a running balance after it. Always
+   populate `balance` when a balance figure appears for that row, even if the row's description
+   wraps across multiple lines in the source text.
 
-IMPORTANT: Return ONLY the JSON object. No explanations, no markdown, no code blocks. Just pure JSON."""
+2. INVOICES / RECEIPTS: Extract EXACTLY ONE transaction per document, representing the document's
+   final total (the amount actually payable/receivable — e.g. "TOTAL DE PLATĂ", "TOTAL DUE", "TOTAL").
+   Do NOT extract the individual line items (products/services) or the subtotal/tax breakdown
+   as separate transactions — they are components of the same total and WILL cause double-counting
+   if extracted alongside it.
 
+   TWO-COLUMN LAYOUT: many invoices print FURNIZOR and CLIENT side by side in two columns (e.g.
+   "FURNIZOR / LOCATOR" on the left, "CLIENT / LOCATAR" on the right). In the extracted text, each
+   original visual row is on its own line, with the left-column value and right-column value of
+   that same row joined by " | " in that fixed left-to-right order. This means, across consecutive
+   lines, the FIRST item before " | " on each line all belong to the same (left) party, and the
+   SECOND item after " | " on each line all belong to the same (right) party — e.g. a name line
+   "REAL ESTATE PARK S.R.L. | NEXUS DIGITAL S.R.L." followed by a CIF line
+   "CIF: RO29384710 | CIF: RO38492011" means the FIRST name pairs with the FIRST CIF (both left
+   column), and the SECOND name pairs with the SECOND CIF (both right column) — do not cross-pair
+   the first name with the second CIF. Use the "FURNIZOR"/"CLIENT" (or "LOCATOR"/"LOCATAR",
+   "PRESTATOR"/"BENEFICIAR") header line to determine which column (left or right) is the supplier
+   and which is the client.
 
-ONBOARDING_EXTRACTION_PROMPT = """You are an expert data extractor for employee onboarding. You are given one or more images of a document (ID card, CV, employment contract, or similar).
+   For invoices, populate these fields:
+   - `total_amount`: the final total amount (e.g. "TOTAL DE PLATĂ"), as a positive float.
+   - `supplier_name` / `supplier_cif`: the FURNIZOR — the entity issuing the invoice (the seller).
+     Look for labels like "FURNIZOR", "LOCATOR", "PRESTATOR".
+   - `client_name` / `client_cif`: the CLIENT / BENEFICIAR — the entity being billed (the buyer).
+     Look for labels like "CLIENT", "BENEFICIAR", "CUMPĂRĂTOR", "LOCATAR".
+   - Extract names and CIF EXACTLY as printed in the document text (do not rewrite, translate, or
+     "correct" them yourself — preserve original spelling/formatting, including "S.R.L." if
+     present). If the company mentioned in the context above appears here under a slightly
+     different spelling or a possibly OCR-garbled CIF, still transcribe what is actually printed
+     — do not silently normalize it to match the context. The context above is only to help you
+     recognize which party is which when the document is ambiguous or the OCR text is noisy; the
+     actual income/expense matching is handled downstream by separate, deterministic code.
+   - Leave `debit` AND `credit` BOTH null for invoices. Do NOT guess whether the invoice is
+     income or an expense — not even using the context above — that direction is resolved later
+     by deterministic code, not by you.
 
-Your task: extract as many of the following onboarding fields as possible from the document. If a field cannot be found, use an empty string "".
+3. SOURCE TYPE: Set `source_type` to "STATEMENT" for bank statements, "INVOICE" for invoices/receipts.
 
-Return ONLY a valid JSON object with these exact keys:
-{{
-  "firstName": "Person's first name (prenume)",
-  "lastName": "Person's last name (nume de familie)",
-  "email": "Email address",
-  "phone": "Phone number",
-  "cnp": "CNP (Romanian personal numeric code, 13 digits)",
-  "birthDate": "Date of birth in YYYY-MM-DD format",
-  "address": "Full street address",
-  "city": "City / locality",
-  "postalCode": "Postal code",
-  "jobTitle": "Job title / position",
-  "department": "Department",
-  "startDate": "Employment start date in YYYY-MM-DD format",
-  "iban": "IBAN bank account number",
-  "emergencyContactName": "Emergency contact full name",
-  "emergencyContactPhone": "Emergency contact phone number"
-}}
+4. Extracted Fields:
+   - date: The exact date (e.g. YYYY-MM-DD or as it appears). For invoices, use the issue date
+     ("Data emiterii").
+   - description: The description or vendor/client name (see rule 2 for invoices).
+   - debit: The amount spent/withdrawn (positive float). Only for STATEMENT rows.
+   - credit: The amount received/deposited (positive float). Only for STATEMENT rows.
+   - balance: Account balance after transaction (only for STATEMENT, if available).
+   - category: One of: Income, Rent, Utilities, Salaries, Food, Transport, Subscriptions, Taxes,
+     Transfer, Fee, Other. Determine the category from what is actually being billed/paid for
+     (the service/product description), not from the source type or company name. Use these as
+     guidance (both Romanian and English terms — match by meaning, not exact wording):
+       - Rent → chirie, închiriere spațiu, rent, lease.
+       - Utilities → utilități, curent/energie electrică, apă, gaz, internet, telefonie,
+         mentenanță clădire, cheltuieli comune, electricity, water, gas, maintenance fees.
+       - Salaries → salarii, salariu, state de plată, payroll, wages.
+       - Food → alimente, catering, restaurant, groceries.
+       - Transport → combustibil, transport, livrare, fuel, delivery, shipping, freight.
+       - Subscriptions → abonament, licență software, SaaS, subscription, license fee.
+       - Taxes → TVA plătit separat as its own line item (not the invoice's embedded TVA), impozit,
+         taxă locală/de stat, government tax, duty.
+       - Transfer → transfer bancar între conturi proprii, internal transfer (not a purchase).
+       - Fee → comision bancar, comision de procesare, bank fee, service charge.
+       - Income → for STATEMENT credit rows representing incoming payments/revenue with no
+         clearer category above.
+     If a document clearly describes what was bought/rented/paid for and it reasonably fits one
+     of the categories above (even loosely), use that category — do not default to "Other" just
+     because the wording isn't an exact match. Only use "Other" when the description genuinely
+     gives no indication of the nature of the expense/income (e.g. a generic "servicii diverse"
+     with no further detail).
+   - If an invoice has multiple line items spanning different categories (e.g. "Chirie" + "Cotă-
+     parte cheltuieli comune" on the same invoice), pick the category of whichever line item has
+     the largest amount — since only one transaction/category is extracted per invoice (rule 2).
 
-Guidelines:
-- For ID cards (carte de identitate): extract firstName, lastName, cnp, birthDate, address, city. The CNP is a 13-digit number. The birth date can also be derived from the first 7 digits of the CNP (format: SAAMMZZ).
-- For CVs: extract firstName, lastName, email, phone, address, city, jobTitle (most recent or desired role).
-- For employment contracts: extract firstName, lastName, jobTitle, department, startDate, iban, and any other available fields.
-- Always try to extract as many fields as possible regardless of document type.
-- For Romanian names, "Prenume" = firstName, "Nume" / "Nume de familie" = lastName.
-- If the document is in Romanian, translate field values only where it makes sense (e.g., keep names, addresses as-is).
+5. Formatting: Remove commas/spaces from numbers so they parse as floats (e.g. 1,234.56 -> 1234.56).
 
-IMPORTANT: Return ONLY the JSON object. No explanations, no markdown, no code blocks. Just pure JSON."""
+Text to process:
+{text}
+"""
