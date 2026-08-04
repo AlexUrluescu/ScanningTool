@@ -1,4 +1,3 @@
-"""Build the LangGraph financial report pipeline with PARALLEL document processing."""
 from langgraph.graph import StateGraph, START, END
 from langgraph.constants import Send
 from core.state import FinancialState

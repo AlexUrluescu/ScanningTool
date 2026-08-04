@@ -24,7 +24,9 @@ class Transaction(BaseModel):
     supplier_cif: Optional[str] = None
     client_name: Optional[str] = None
     client_cif: Optional[str] = None
-    direction_resolved: bool = False 
+    direction_resolved: bool = False
+    direction_fallback: bool = False 
+
 
 
 class ExtractionResult(BaseModel):

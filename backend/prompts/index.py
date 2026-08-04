@@ -23,15 +23,14 @@ CRITICAL INSTRUCTIONS:
    original visual row is on its own line, with the left-column value and right-column value of
    that same row joined by " | " in that fixed left-to-right order. This means, across consecutive
    lines, the FIRST item before " | " on each line all belong to the same (left) party, and the
-   SECOND item after " | " on each line all belong to the same (right) party — e.g. a name line
-   "REAL ESTATE PARK S.R.L. | NEXUS DIGITAL S.R.L." followed by a CIF line
-   "CIF: RO29384710 | CIF: RO38492011" means the FIRST name pairs with the FIRST CIF (both left
-   column), and the SECOND name pairs with the SECOND CIF (both right column) — do not cross-pair
-   the first name with the second CIF. Use the "FURNIZOR"/"CLIENT" (or "LOCATOR"/"LOCATAR",
-   "PRESTATOR"/"BENEFICIAR") header line to determine which column (left or right) is the supplier
-   and which is the client.
+   SECOND item after " | " on each line all belong to the same (right) party. 
+   CRITICAL: The information might be MISALIGNED across rows (e.g., the supplier's CIF might be on 
+   row 3 left side, but the client's CIF might be on row 4 right side). Simply treat EVERYTHING before 
+   the " | " as belonging to the left column's party, and EVERYTHING after the " | " as belonging to 
+   the right column's party. Use the "FURNIZOR"/"CLIENT" header line to determine which column 
+   is the supplier and which is the client.
 
-   For invoices, populate these fields:
+   For invoices, populate these fields IN ADDITION to the standard `date`, `description`, and `category` fields:
    - `total_amount`: the final total amount (e.g. "TOTAL DE PLATĂ"), as a positive float.
    - `supplier_name` / `supplier_cif`: the FURNIZOR — the entity issuing the invoice (the seller).
      Look for labels like "FURNIZOR", "LOCATOR", "PRESTATOR".

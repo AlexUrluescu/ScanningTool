@@ -1,20 +1,18 @@
-"""LangGraph nodes for the financial report pipeline."""
-import base64
-import io
 import re
 import threading
 from collections import Counter
 from typing import Optional
-from PIL import Image
-from paddleocr import PaddleOCR
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage
 from core.state import FinancialState, DocumentInput, ExtractionResult
 from prompts.index import FINANCIAL_EXTRACTION_PROMPT
+from graph.ocr_worker import run_ocr_single
+import dateutil.parser
+import unicodedata
+from difflib import SequenceMatcher
 
-ocr = PaddleOCR(lang="en")
-_ocr_lock = threading.Lock() 
-llm = ChatOllama(model="qwen2.5:7b", temperature=0)
+llm_lock = threading.Lock()
+llm = ChatOllama(model="llama3.1:8b", temperature=0)
 
 _DATE_LINE_RE = re.compile(r"^\s*\d{1,4}[./-]\d{1,2}[./-]\d{1,4}")
 
@@ -46,75 +44,6 @@ def merge_continuation_lines(lines_text: list[str]) -> list[str]:
     return merged
 
 
-def _run_ocr_on_image(img_b64: str, doc_index: int, total_docs: int) -> str:
-    """Run PaddleOCR on a single base64-encoded image and return structured text.
-    
-    This is the core OCR logic extracted from extract_ocr, untouched.
-    """
-    img_bytes = base64.b64decode(img_b64)
-    image = Image.open(io.BytesIO(img_bytes))
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    import numpy as np
-    img_array = np.array(image)
-    img_array = img_array[:, :, ::-1]
-
-    with _ocr_lock:
-        result = ocr.ocr(img_array)
-
-    items = [] 
-
-    if result and result[0]:
-        res = result[0]
-
-        if isinstance(res, dict):
-            texts = res.get("rec_texts", [])
-            polys = res.get("rec_polys") or res.get("dt_polys") or []
-            for text, poly in zip(texts, polys):
-                xs = [pt[0] for pt in poly]
-                ys = [pt[1] for pt in poly]
-                items.append((sum(ys) / len(ys), sum(xs) / len(xs), text))
-        else:
-            for box, (text, conf) in res:
-                y_center = sum(pt[1] for pt in box) / 4.0
-                x_center = sum(pt[0] for pt in box) / 4.0
-                items.append((y_center, x_center, text))
-
-    items.sort(key=lambda x: x[0])
-    rows = []
-    current_row = []
-    current_y = None
-
-    for y, x, text in items:
-        if current_y is None:
-            current_y = y
-            current_row.append((x, text))
-        elif abs(y - current_y) < 15:
-            current_row.append((x, text))
-            current_y = (current_y * len(current_row) + y) / (len(current_row) + 1)
-        else:
-            rows.append(current_row)
-            current_row = [(x, text)]
-            current_y = y
-
-    if current_row:
-        rows.append(current_row)
-
-    lines_text = []
-    for row in rows:
-        row.sort(key=lambda item: item[0])
-        lines_text.append(" | ".join(item[1] for item in row))
-
-    lines_text = merge_continuation_lines(lines_text)
-
-    page_text = "\n".join(lines_text)
-    doc_label = f"--- Document {doc_index + 1} / {total_docs} ---"
-    full_text = f"{doc_label}\n{page_text}"
-
-    print(f"[OCR] Processed document {doc_index + 1}/{total_docs} — {len(lines_text)} rows reconstructed")
-    return full_text
-
 
 def _build_company_context(company_name: Optional[str], company_cif: Optional[str]) -> str:
     """Build a context block about the main company, injected into the prompt."""
@@ -135,35 +64,149 @@ def _build_company_context(company_name: Optional[str], company_cif: Optional[st
 
 
 def _run_extraction_on_text(text: str, doc_index: int, company_name: Optional[str], company_cif: Optional[str]) -> list:
-    """Run LLM structured extraction on OCR text. Returns list of Transaction objects.
-    
-    This is the core extraction logic from extract_transactions, untouched.
-    """
+    """Run LLM structured extraction on OCR text. Returns list of Transaction objects."""
     company_context = _build_company_context(company_name, company_cif)
     prompt = FINANCIAL_EXTRACTION_PROMPT.format(text=text, company_context=company_context)
     message = HumanMessage(content=prompt)
 
-    structured_llm = llm.with_structured_output(ExtractionResult)
+    # print(f"\\n--- [DEBUG-LLM] PROMPT SENT TO QWEN (Doc {doc_index + 1}) ---")
+    # print(prompt[:200] + "...") # trunchiat
+    # print("------------------------------------------------------\\n")
 
+    import json
+    
     try:
-        response = structured_llm.invoke([message])
-        if response and response.transactions:
-            print(f"[LLM] Extracted {len(response.transactions)} transactions from document {doc_index + 1}")
-            return list(response.transactions)
+        with llm_lock:
+            # Folosim format="json" ca să forțăm Ollama să nu pună texte conversaționale
+            response = llm.bind(format="json").invoke([message])
+        
+        raw_text = response.content.strip()
+        # print(f"\\n--- [DEBUG-LLM] RAW JSON FROM QWEN (Doc {doc_index + 1}) ---")
+        # print(raw_text[:200] + "...") # trunchiat
+        # print("------------------------------------------------------\\n")
+
+        # Eliminăm posibilele block-uri markdown ```json
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:]
+        if raw_text.startswith("```"):
+            raw_text = raw_text[3:]
+        if raw_text.endswith("```"):
+            raw_text = raw_text[:-3]
+        raw_text = raw_text.strip()
+
+        data = json.loads(raw_text)
+        from core.state import Transaction
+        
+        # Parsare robustă (Qwen câteodată dă un obiect direct în loc de listă de obiecte)
+        if "transactions" in data and isinstance(data["transactions"], list):
+            txs_data = data["transactions"]
+        elif isinstance(data, list):
+            txs_data = data
+        elif isinstance(data, dict) and ("date" in data or "source_type" in data):
+            txs_data = [data]
         else:
-            print(f"[LLM] No transactions found in document {doc_index + 1}")
+            print(f"[LLM] Error: Unexpected JSON structure: {raw_text[:150]}")
             return []
+
+        # Validare prin Pydantic
+        transactions = []
+        valid_categories = {'Income', 'Rent', 'Utilities', 'Salaries', 'Food', 'Transport', 'Subscriptions', 'Taxes', 'Transfer', 'Fee', 'Other'}
+        
+        for t_data in txs_data:
+            # Plase de siguranță (fallback-uri) dacă Qwen uită câmpuri obligatorii sau pune null
+            if not t_data.get("description"):
+                t_data["description"] = t_data.get("supplier_name") or t_data.get("client_name") or "Unknown"
+            
+            # Asigurăm că categoria e fix din lista permisă de Pydantic
+            cat = t_data.get("category")
+            if not cat or cat not in valid_categories:
+                t_data["category"] = "Other"
+                
+            if not t_data.get("date"):
+                t_data["date"] = "1970-01-01"
+            
+            try:
+                transactions.append(Transaction(**t_data))
+            except Exception as val_e:
+                print(f"[LLM] Validation error for a transaction: {val_e}")
+
+        # --- Post-procesare: corectează greșelile frecvente ale LLM-ului ---
+        for tx in transactions:
+            if tx.source_type != "INVOICE":
+                continue
+
+            # Fix 1: Qwen pune uneori suma în credit/debit în loc de total_amount.
+            # Mutăm valoarea în total_amount și golim credit/debit (conform promptului).
+            if tx.total_amount is None:
+                if tx.credit is not None:
+                    print(f"  [Post-fix] Moved credit={tx.credit} → total_amount (was None)")
+                    tx.total_amount = tx.credit
+                    tx.credit = None
+                elif tx.debit is not None:
+                    print(f"  [Post-fix] Moved debit={tx.debit} → total_amount (was None)")
+                    tx.total_amount = tx.debit
+                    tx.debit = None
+
+            # Fix 2: Qwen uneori nu extrage supplier/client deloc (ex: factura DIGI).
+            # Dacă description conține un nume de firmă și nu e compania noastră,
+            # Dacă description conține un nume de firmă și nu e compania noastră,
+            # îl setăm ca supplier_name (cel mai frecvent caz: factura de la un furnizor).
+            if not tx.supplier_name and not tx.client_name and tx.description:
+                # Dacă description arată ca un nume de firmă, folosim-o ca supplier
+                tx.supplier_name = tx.description
+                print(f"  [Post-fix] Set supplier_name from description: {tx.supplier_name!r}")
+            
+            # Fix 3: Extragere deterministă a CIF-urilor lipsă cu Regex direct din textul OCR.
+            if not tx.supplier_cif or not tx.client_cif:
+                import re
+                # Căutăm toate secvențele care arată a CIF/CUI în text
+                found_cifs = re.findall(r"(?:CIF|CUI|C\.I\.F\.)[^\w]*([A-Za-z]*\s*\d{6,10})", text, flags=re.IGNORECASE)
+                if found_cifs:
+                    # Curățăm CIF-urile găsite
+                    clean_cifs = [_normalize_cif(c) for c in found_cifs if _normalize_cif(c)]
+                    # Deduplicăm păstrând ordinea
+                    seen = set()
+                    unique_cifs = [x for x in clean_cifs if not (x in seen or seen.add(x))]
+                    
+                    if len(unique_cifs) >= 1:
+                        # Dacă e primul CIF găsit și ne lipsește furnizorul
+                        if not tx.supplier_cif and tx.supplier_name:
+                            tx.supplier_cif = unique_cifs[0]
+                            print(f"  [Post-fix] Extracted supplier_cif via regex: {tx.supplier_cif}")
+                    
+                    if len(unique_cifs) >= 2:
+                        # Al doilea CIF este, de obicei, al clientului
+                        if not tx.client_cif:
+                            tx.client_cif = unique_cifs[1]
+                            print(f"  [Post-fix] Extracted client_cif via regex: {tx.client_cif}")
+
+        if transactions:
+            print(f"[LLM] Extracted {len(transactions)} transactions from document {doc_index + 1}")
+            for i, tx in enumerate(transactions):
+                print(f"  [LLM-TX-{i}] desc={tx.description!r}, source={tx.source_type}")
+                print(f"    supplier: name={tx.supplier_name!r}, cif={tx.supplier_cif!r}")
+                print(f"    client:   name={tx.client_name!r}, cif={tx.client_cif!r}")
+                print(f"    total_amount={tx.total_amount}, debit={tx.debit}, credit={tx.credit}")
+            return transactions
+        else:
+            print(f"[LLM] No valid transactions found in document {doc_index + 1}")
+            return []
+
+    except json.JSONDecodeError as e:
+        print(f"[LLM] Invalid JSON returned: {e}")
+        return []
     except Exception as e:
         print(f"[LLM] Error extracting transactions: {e}")
         return []
 
 
 def process_document(state: DocumentInput) -> dict:
-    """Process a single document: OCR → LLM extraction.
-    
+    """Process a single document: OCR (in separate process) → LLM extraction.
+
     This node is called IN PARALLEL via Send() for each document.
-    It receives a DocumentInput (single doc), not the full FinancialState.
-    Returns partial state updates that get merged via operator.add reducers.
+    OCR runs in an isolated process (via ProcessPoolExecutor) which has
+    its own PaddleOCR instance — no shared memory, no corrupted results.
+    LLM calls still run in threads (Ollama queues them internally).
     """
     doc_b64 = state["doc_b64"]
     doc_index = state["doc_index"]
@@ -171,30 +214,17 @@ def process_document(state: DocumentInput) -> dict:
     company_name = state.get("company_name")
     company_cif = state.get("company_cif")
 
-    print(f"\n[DEBUG-START] processing doc_index={doc_index+1}/{total_docs}, base64_len={len(doc_b64)}")
 
-    extracted_text = _run_ocr_on_image(doc_b64, doc_index, total_docs)
+    extracted_text = run_ocr_single(doc_b64, doc_index, total_docs)
     
-    print(f"[DEBUG-OCR] doc_index={doc_index+1}/{total_docs} OCR length: {len(extracted_text)} chars")
-    print(f"[DEBUG-OCR-PREVIEW] doc_index={doc_index+1}/{total_docs}: {repr(extracted_text[:150])}...")
+    print(f"\\n{'='*60}\\n[OCR-FULL-TEXT] doc_index={doc_index+1}/{total_docs}\\n{extracted_text}\\n{'='*60}\\n")
 
     transactions = _run_extraction_on_text(extracted_text, doc_index, company_name, company_cif)
-
-    print(f"[DEBUG-LLM] doc_index={doc_index+1}/{total_docs} extracted {len(transactions)} txs")
-    for i, t in enumerate(transactions):
-        print(f"  tx {i}: date={t.date} desc={t.description} debit={t.debit} credit={t.credit} total={t.total_amount}")
-
-    print(f"[DEBUG-END] finished doc_index={doc_index+1}/{total_docs}\n")
 
     return {
         "extracted_texts": [extracted_text],
         "extracted_transactions": transactions,
     }
-
-
-import dateutil.parser
-import unicodedata
-from difflib import SequenceMatcher
 
 
 def parse_date(date_str: str):
@@ -206,12 +236,7 @@ def parse_date(date_str: str):
 
 
 def _normalize_cif(cif: Optional[str]) -> Optional[str]:
-    """Normalizează un CIF pentru comparație (fără 'RO', fără spații, uppercase).
-
-    OCR-ul poate introduce inconsistențe (spații, litere lipsă), dar cel puțin
-    prefixul 'RO' și spațiile sunt un caz sigur de normalizat fără riscul de a
-    masca o eroare de citire.
-    """
+    """Normalizează un CIF pentru comparație (fără 'RO', fără spații, uppercase)."""
     if not cif:
         return None
     c = cif.upper().replace(" ", "").strip()
@@ -224,16 +249,10 @@ _LEGAL_SUFFIXES = (
 
 
 def _normalize_name(name: Optional[str]) -> Optional[str]:
-    """Normalizează numele unei companii pentru comparație fuzzy.
-
-    Elimină diacritice, punctuație, sufixe legale (S.R.L., S.A. etc.) și
-    spații redundante. Scopul e ca 'Nexus Digital S.R.L.' și 'NEXUS DIGITAL
-    SRL' (citite diferit de OCR pe cele două facturi) să ajungă la aceeași
-    formă normalizată.
-    """
+    """Normalizează numele unei companii pentru comparație fuzzy."""
     if not name:
         return None
-    
+
     n = unicodedata.normalize("NFKD", name)
     n = "".join(c for c in n if not unicodedata.combining(c))
     n = n.upper()
@@ -243,8 +262,16 @@ def _normalize_name(name: Optional[str]) -> Optional[str]:
 
 
 def _names_match(a: Optional[str], b: Optional[str], threshold: float = 0.87) -> bool:
-    """Compară două nume normalizate prin similaritate fuzzy (nu doar egalitate exactă),
-    ca să tolereze mici erori de OCR (o literă citită greșit etc.)."""
+    """Compară două nume normalizate prin similaritate fuzzy."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def _cifs_match(a: Optional[str], b: Optional[str], threshold: float = 0.85) -> bool:
+    """Compară două CIF-uri normalizate prin similaritate fuzzy pentru a ignora erorile OCR minore."""
     if not a or not b:
         return False
     if a == b:
@@ -256,32 +283,7 @@ def resolve_invoice_directions(
     transactions: list, company_cif: Optional[str], company_name: Optional[str]
 ) -> tuple[list, Optional[str], Optional[str], bool]:
     """Decide determinist debit vs. credit pentru fiecare factură, pe baza CIF-ului
-    ȘI/SAU numelui companiei principale — NU pe baza unei presupuneri făcute de LLM.
-
-    LLM-ul (vezi prompt) NU mai stabilește direcția facturii; extrage doar datele
-    brute (total_amount, supplier_cif/name, client_cif/name). Direcția e calculată
-    aici, determinist.
-
-    Ordine de comparație per factură (pentru fiecare parte — furnizor și client):
-      1. CIF exact (normalizat) — semnalul cel mai de încredere.
-      2. Nume normalizat + comparație fuzzy — fallback pentru cazul în care CIF-ul
-         lipsește din OCR sau a fost citit greșit (cifre confundate), dar numele
-         companiei tot poate fi recunoscut.
-
-    Identificarea companiei principale:
-      1. Dacă `company_cif` sau `company_name` sunt furnizate explicit în state,
-         se folosesc direct (CIF are prioritate dacă ambele sunt date).
-      2. Altfel, se detectează automat compania principală ca fiind identitatea
-         (CIF sau nume normalizat) care apare cel mai des ca furnizor SAU client
-         peste toate facturile. Necesită minim 2 apariții ca să nu fie o ghicire
-         din întâmplare pe un singur document.
-      3. Dacă direcția tot nu poate fi determinată nici pe CIF, nici pe nume,
-         tranzacția rămâne needetectată și e semnalată pentru verificare manuală
-         — nu se ghicește niciodată.
-
-    Returns:
-        (transactions, resolved_cif, resolved_name, was_auto_detected)
-    """
+    ȘI/SAU numelui companiei principale — NU pe baza unei presupuneri făcute de LLM."""
     invoice_txs = [t for t in transactions if t.source_type == "INVOICE"]
     resolved_cif = _normalize_cif(company_cif)
     resolved_name = _normalize_name(company_name)
@@ -310,9 +312,17 @@ def resolve_invoice_directions(
                 resolved_name = top_name
                 auto_detected = True
 
-    for t in invoice_txs:
-        if t.total_amount is None:
+    print(f"\n[Resolve] resolved_cif={resolved_cif!r}, resolved_name={resolved_name!r}")
+    print(f"[Resolve] Total invoices to resolve: {len(invoice_txs)}")
 
+    for t in invoice_txs:
+        print(f"\n[Resolve] --- Invoice: {t.description!r} ---")
+        print(f"  total_amount={t.total_amount}, debit={t.debit}, credit={t.credit}")
+        print(f"  supplier: name={t.supplier_name!r} cif={t.supplier_cif!r}")
+        print(f"  client:   name={t.client_name!r} cif={t.client_cif!r}")
+
+        if t.total_amount is None:
+            print(f"  → SKIP: total_amount is None")
             t.direction_resolved = False
             continue
 
@@ -321,26 +331,68 @@ def resolve_invoice_directions(
         supplier_name = _normalize_name(t.supplier_name)
         client_name = _normalize_name(t.client_name)
 
-        is_supplier = (resolved_cif and supplier_cif == resolved_cif) or \
+        print(f"  normalized: supplier_cif={supplier_cif!r}, client_cif={client_cif!r}")
+        print(f"  normalized: supplier_name={supplier_name!r}, client_name={client_name!r}")
+
+        is_supplier = (resolved_cif and _cifs_match(supplier_cif, resolved_cif)) or \
                       (resolved_name and _names_match(supplier_name, resolved_name))
-        is_client = (resolved_cif and client_cif == resolved_cif) or \
+        is_client = (resolved_cif and _cifs_match(client_cif, resolved_cif)) or \
                     (resolved_name and _names_match(client_name, resolved_name))
 
+        print(f"  is_supplier={is_supplier}, is_client={is_client}")
+
         if is_supplier and not is_client:
-     
             t.credit = t.total_amount
             t.debit = None
             t.direction_resolved = True
         elif is_client and not is_supplier:
-          
             t.debit = t.total_amount
             t.credit = None
             t.direction_resolved = True
         else:
-       
-            t.debit = None
-            t.credit = None
-            t.direction_resolved = False
+            # Fallback prin excludere: dacă nu am găsit CIF/nume direct, încercăm
+            # să deducem din faptul că cealaltă parte este clar diferită de noi.
+            # Ex: DIGI ROMANIA S.A. e evident furnizor extern → noi suntem clientul → debit.
+            supplier_is_other = (
+                (resolved_cif and supplier_cif and not _cifs_match(supplier_cif, resolved_cif)) or
+                (resolved_name and supplier_name and not _names_match(supplier_name, resolved_name))
+            )
+            client_is_other = (
+                (resolved_cif and client_cif and not _cifs_match(client_cif, resolved_cif)) or
+                (resolved_name and client_name and not _names_match(client_name, resolved_name))
+            )
+
+            # Avem CIF/nume furnizor populat și el NU e compania noastră → noi suntem clientul
+            if supplier_is_other and supplier_cif and not client_cif and not client_name:
+                # Factura emisă de altcineva, câmpul client e gol → presupunem că noi suntem clientul
+                t.debit = t.total_amount
+                t.credit = None
+                t.direction_resolved = True
+                t.direction_fallback = True
+                print(f"[Resolve] Fallback debit (supplier={t.supplier_name}, our company not in client field)")
+            elif supplier_is_other and client_is_other:
+                # Ambele entități sunt diferite de compania noastră — cu adevărat neclasificabilă
+                t.debit = None
+                t.credit = None
+                t.direction_resolved = False
+            elif supplier_is_other:
+                # Furnizorul e altcineva → suntem clientul → cheltuială
+                t.debit = t.total_amount
+                t.credit = None
+                t.direction_resolved = True
+                t.direction_fallback = True
+                print(f"[Resolve] Fallback debit by exclusion (supplier={t.supplier_name})")
+            elif client_is_other:
+                # Clientul e altcineva → suntem furnizorul → venit
+                t.credit = t.total_amount
+                t.debit = None
+                t.direction_resolved = True
+                t.direction_fallback = True
+                print(f"[Resolve] Fallback credit by exclusion (client={t.client_name})")
+            else:
+                t.debit = None
+                t.credit = None
+                t.direction_resolved = False
 
     return transactions, resolved_cif, resolved_name, auto_detected
 
@@ -367,7 +419,7 @@ def generate_report(state: FinancialState) -> dict:
 
     for inv in invoice_txs:
         if not inv.direction_resolved:
-            continue 
+            continue
 
         inv_amt = inv.debit or inv.credit or 0.0
         inv_date = parse_date(inv.date)
@@ -384,7 +436,6 @@ def generate_report(state: FinancialState) -> dict:
             if amount_match and direction_match and date_match:
                 inv.matched_invoice = True
                 break
-
 
     total_income = sum(t.credit or 0.0 for t in bank_txs) + \
         sum(t.credit or 0.0 for t in invoice_txs if t.direction_resolved and not t.matched_invoice)
@@ -431,7 +482,6 @@ def generate_report(state: FinancialState) -> dict:
             "`balance` value extracted, so the total could not be verified."
         )
 
-    # NOU: mesaj despre compania principală folosită pentru rezolvarea direcției
     company_msg = ""
     if resolved_cif or resolved_name:
         source = "detectat automat (recurent în facturi)" if auto_detected else "configurat explicit"
@@ -476,6 +526,8 @@ def generate_report(state: FinancialState) -> dict:
         source = t.source_type
         if t.matched_invoice:
             source += " ✅ *(Matched)*"
+        elif t.source_type == "INVOICE" and t.direction_resolved and t.direction_fallback:
+            source += " 🔶 *(Inferred)*"
         elif t.source_type == "INVOICE" and not t.direction_resolved:
             source += " ⚠️ *(Unclassified)*"
 
