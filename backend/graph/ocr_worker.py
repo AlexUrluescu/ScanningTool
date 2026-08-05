@@ -131,6 +131,11 @@ def _get_pool() -> ProcessPoolExecutor:
     """Get or create the process pool (lazy init)."""
     global _pool
     if _pool is None:
+        # Pre-initialize in main process to ensure models are downloaded synchronously
+        # without race conditions from multiple workers.
+        from paddleocr import PaddleOCR
+        _ = PaddleOCR(lang="en")
+        
         _pool = ProcessPoolExecutor(
             max_workers=_NUM_WORKERS,
             initializer=_init_worker,
