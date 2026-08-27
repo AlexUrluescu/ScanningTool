@@ -8,7 +8,13 @@ from prompts.index import FINANCIAL_EXTRACTION_PROMPT
 from graph.ocr_worker import run_ocr_single
 
 llm_lock = threading.Lock()
-llm = ChatOllama(model="llama3.1:8b", temperature=0)
+# llm = ChatOllama(model="llama3.1:8b", temperature=0)
+
+llm = ChatOllama(
+    model="qwen2.5:1.5b", #
+    base_url="http://192.168.100.56:11434",
+    temperature=0
+)
 
 _DATE_LINE_RE = re.compile(r"^\s*\d{1,4}[./-]\d{1,2}[./-]\d{1,4}")
 
@@ -60,6 +66,17 @@ def _run_extraction_on_text(text: str, doc_index: int) -> list:
             except Exception as val_e:
                 print(f"[LLM] Validation error for an expense: {val_e}")
 
+        # Post-fix: extract receipt date deterministically from OCR text
+        # Small models often miss it, so we use regex instead
+        date_pattern = re.compile(r"\b(\d{2}[./]\d{2}[./]\d{4})\b")
+        for exp in expenses:
+            if not exp.receipt_date:
+                all_dates = date_pattern.findall(text)
+                if all_dates:
+                    # Use the last date found (usually the receipt print date near the bottom)
+                    exp.receipt_date = all_dates[-1]
+                    print(f"  [Post-fix] Extracted receipt_date: {exp.receipt_date}")
+
         if expenses:
             print(f"[LLM] Extracted {len(expenses)} expenses from document {doc_index + 1}")
             return expenses
@@ -80,6 +97,8 @@ def process_document(state: DocumentInput) -> dict:
     print(f"\n{'='*60}\n[OCR-FULL-TEXT] doc_index={doc_index+1}/{total_docs}\n{extracted_text}\n{'='*60}\n")
 
     expenses = _run_extraction_on_text(extracted_text, doc_index)
+
+    print(f"expenses: {expenses}")
 
     return {
         "extracted_texts": [extracted_text],

@@ -118,7 +118,22 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
         )
 
     extracted = result.get("extracted_expenses", [])
-    expenses_obj = extracted[0] if extracted else {}
+    
+    if extracted:
+        exp = extracted[0]
+        # Concatenate invoice number + date for the response
+        invoice_str = exp.invoice_number_date
+        if exp.receipt_date:
+            invoice_str = f"{invoice_str} / {exp.receipt_date}"
+        
+        expenses_obj = {
+            "expense_description": exp.expense_description,
+            "invoice_number_date": invoice_str,
+            "expense_amount": exp.expense_amount,
+            "currency": exp.currency,
+        }
+    else:
+        expenses_obj = {}
 
     return {
         "success": True,

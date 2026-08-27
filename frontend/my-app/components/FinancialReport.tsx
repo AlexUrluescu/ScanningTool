@@ -173,7 +173,6 @@ export default function FinancialReport() {
                     invoice_number_date: "",
                     expense_amount: 0,
                     currency: "RON",
-                    payment_method: "",
                   },
                 ]
           }

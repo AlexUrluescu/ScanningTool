@@ -11,9 +11,9 @@ CategoryType = Literal[
 class BusinessTripExpense(BaseModel):
     expense_description: str
     invoice_number_date: str
+    receipt_date: str = ""
     expense_amount: float
     currency: str
-    payment_method: str
 
 class ExtractionResult(BaseModel):
     expenses: list[BusinessTripExpense]
