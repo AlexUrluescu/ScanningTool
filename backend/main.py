@@ -104,7 +104,7 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
         result = graph.invoke({
             "documents": all_document_images,
             "extracted_texts": [],
-            "extracted_transactions": [],
+            "extracted_expenses": [],
             "current_doc_index": 0,
             "report": "",
             "company_name": "Nexus Digital",
@@ -117,10 +117,14 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
             detail=f"Report generation failed: {str(e)}"
         )
 
+    extracted = result.get("extracted_expenses", [])
+    expenses_obj = extracted[0] if extracted else {}
+
     return {
         "success": True,
         "report": result.get("report", ""),
         "pages_processed": len(all_document_images),
         "files": filenames,
         "extracted_texts": result.get("extracted_texts", []),
+        "expenses": expenses_obj,
     }

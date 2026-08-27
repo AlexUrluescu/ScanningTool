@@ -8,29 +8,15 @@ CategoryType = Literal[
 ]
 
 
-class Transaction(BaseModel):
-    date: str
-    description: str
-    debit: Optional[float] = None
-    credit: Optional[float] = None
-    balance: Optional[float] = None
-    category: CategoryType
-    source_type: Literal["STATEMENT", "INVOICE"] = Field(
-        description="'STATEMENT' if from a bank statement, 'INVOICE' if from an invoice or receipt"
-    )
-    matched_invoice: bool = False
-    total_amount: Optional[float] = None
-    supplier_name: Optional[str] = None
-    supplier_cif: Optional[str] = None
-    client_name: Optional[str] = None
-    client_cif: Optional[str] = None
-    direction_resolved: bool = False
-    direction_fallback: bool = False 
-
-
+class BusinessTripExpense(BaseModel):
+    expense_description: str
+    invoice_number_date: str
+    expense_amount: float
+    currency: str
+    payment_method: str
 
 class ExtractionResult(BaseModel):
-    transactions: list[Transaction]
+    expenses: list[BusinessTripExpense]
 
 
 class DocumentInput(TypedDict):
@@ -47,7 +33,7 @@ class FinancialState(TypedDict):
     documents: list[str]
 
     extracted_texts: Annotated[list[str], operator.add]
-    extracted_transactions: Annotated[list, operator.add]
+    extracted_expenses: Annotated[list, operator.add]
     current_doc_index: int
     report: str
 
