@@ -49,11 +49,17 @@ def _run_extraction_on_text(text: str, doc_index: int) -> list:
         data = json.loads(raw_text)
         from core.state import BusinessTripExpense
         
+        if isinstance(data, dict) and data.get("valid") is False:
+            print(f"[LLM] Document {doc_index + 1} rejected: not a fiscal receipt")
+            return _INVALID_DOC_ERROR
+        
         if "expenses" in data and isinstance(data["expenses"], list):
             txs_data = data["expenses"]
         elif isinstance(data, list):
             txs_data = data
         elif isinstance(data, dict):
+
+            data.pop("valid", None)
             txs_data = [data]
         else:
             print(f"[LLM] Error: Unexpected JSON structure: {raw_text[:150]}")
@@ -88,6 +94,10 @@ def _run_extraction_on_text(text: str, doc_index: int) -> list:
         print(f"[LLM] Error extracting expenses: {e}")
         return []
 
+
+_INVALID_DOC_ERROR = "__INVALID_DOCUMENT__"
+
+
 def process_document(state: DocumentInput) -> dict:
     doc_b64 = state["doc_b64"]
     doc_index = state["doc_index"]
@@ -96,13 +106,20 @@ def process_document(state: DocumentInput) -> dict:
     extracted_text = run_ocr_single(doc_b64, doc_index, total_docs)
     print(f"\n{'='*60}\n[OCR-FULL-TEXT] doc_index={doc_index+1}/{total_docs}\n{extracted_text}\n{'='*60}\n")
 
-    expenses = _run_extraction_on_text(extracted_text, doc_index)
+    result = _run_extraction_on_text(extracted_text, doc_index)
 
-    print(f"expenses: {expenses}")
+    # If the AI rejected the document, pass the error marker through
+    if result == _INVALID_DOC_ERROR:
+        return {
+            "extracted_texts": [extracted_text],
+            "extracted_expenses": [_INVALID_DOC_ERROR],
+        }
+
+    print(f"expenses: {result}")
 
     return {
         "extracted_texts": [extracted_text],
-        "extracted_expenses": expenses,
+        "extracted_expenses": result,
     }
 
 def generate_report(state: FinancialState) -> dict:

@@ -61,14 +61,24 @@ export default function FinancialReport() {
         const result = await response.json();
 
         console.log("result", result);
+
+        if (result.success === false) {
+          throw new Error(
+            result.error || "The document could not be processed.",
+          );
+        }
+
         const newExpense = result.expenses;
-        
-        // Add filename to expense if we have one file
-        if (items.length === 1 && newExpense && Object.keys(newExpense).length > 0) {
-           newExpense.filename = items[0].file.name;
-           setExpenses((prev) => [...prev, newExpense]);
+
+        if (
+          items.length === 1 &&
+          newExpense &&
+          Object.keys(newExpense).length > 0
+        ) {
+          newExpense.filename = items[0].file.name;
+          setExpenses((prev) => [...prev, newExpense]);
         } else if (newExpense && Object.keys(newExpense).length > 0) {
-           setExpenses((prev) => [...prev, newExpense]);
+          setExpenses((prev) => [...prev, newExpense]);
         }
       } catch (err) {
         setError(

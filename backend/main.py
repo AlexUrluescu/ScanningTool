@@ -119,6 +119,15 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
 
     extracted = result.get("extracted_expenses", [])
     
+    if extracted and extracted[0] == "__INVALID_DOCUMENT__":
+        return {
+            "success": False,
+            "error": "The uploaded document does not appear to be a fiscal receipt or invoice. Please upload a valid receipt (bon fiscal, factură, etc.).",
+            "pages_processed": len(all_document_images),
+            "files": filenames,
+            "expenses": {},
+        }
+    
     if extracted:
         exp = extracted[0]
         # Concatenate invoice number + date for the response
