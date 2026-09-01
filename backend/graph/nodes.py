@@ -12,7 +12,13 @@ import unicodedata
 from difflib import SequenceMatcher
 
 llm_lock = threading.Lock()
-llm = ChatOllama(model="llama3.1:8b", temperature=0)
+# llm = ChatOllama(model="llama3.1:8b", temperature=0)
+
+llm = ChatOllama(
+    model="llama3.1:8b", #
+    base_url="http://192.168.100.56:11434",
+    temperature=0
+)
 
 _DATE_LINE_RE = re.compile(r"^\s*\d{1,4}[./-]\d{1,2}[./-]\d{1,4}")
 
@@ -76,9 +82,9 @@ def _run_extraction_on_text(text: str, doc_index: int, company_name: Optional[st
     import json
     
     try:
-        with llm_lock:
+        # with llm_lock:
             # Folosim format="json" ca să forțăm Ollama să nu pună texte conversaționale
-            response = llm.bind(format="json").invoke([message])
+        response = llm.bind(format="json").invoke([message])
         
         raw_text = response.content.strip()
         # print(f"\\n--- [DEBUG-LLM] RAW JSON FROM QWEN (Doc {doc_index + 1}) ---")
