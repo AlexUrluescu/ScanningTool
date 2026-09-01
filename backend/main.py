@@ -1,7 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Response
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import traceback
+import os
+import requests
+from jose import jwt, JWTError
 from graph.builder import create_graph
 from tools.parser import parse_document_to_images
 
@@ -28,8 +32,56 @@ SUPPORTED_TYPES = {
     "image/jpg",
     "image/webp",
 }
-
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB per file
+
+security = HTTPBearer()
+
+KEYCLOAK_URL = os.getenv("KEYCLOAK_URL", "http://localhost:8080/realms/master")
+
+CLIENT_ID = os.getenv("CLIENT_ID", "fastapi-image-to-text")
+
+try:
+    jwks_url = f"{KEYCLOAK_URL}/protocol/openid-connect/certs"
+    jwks = requests.get(jwks_url).json()
+    print("[Auth] Cheile publice Keycloak au fost încărcate cu succes.")
+except Exception as e:
+    print(f"[Auth] Eroare la obținerea JWKS de la Keycloak: {e}")
+    jwks = {"keys": []}
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """
+    Dependință care validează token-ul JWT la fiecare apel.
+    """
+    token = credentials.credentials
+    try:
+        unverified_header = jwt.get_unverified_header(token)
+        rsa_key = {}
+        for key in jwks.get("keys", []):
+            if key["kid"] == unverified_header.get("kid"):
+                rsa_key = {
+                    "kty": key["kty"],
+                    "kid": key["kid"],
+                    "use": key["use"],
+                    "n": key["n"],
+                    "e": key["e"]
+                }
+                break
+                
+        if not rsa_key:
+            raise HTTPException(status_code=401, detail="Cheia publică pentru token nu a fost găsită.")
+
+        payload = jwt.decode(
+            token,
+            rsa_key,
+            algorithms=[unverified_header["alg"]],
+            issuer=KEYCLOAK_URL,
+            options={"verify_aud": False}
+        )
+        return payload
+
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Token invalid sau expirat: {str(e)}")
+
 
 
 @app.get("/api/health")
@@ -37,8 +89,21 @@ async def health_check():
     return {"status": "ok", "service": "financial-report-ai"}
 
 
+@app.get("/api/secure-health")
+async def secure_health_check(user_payload: dict = Depends(verify_token)):
+    """
+    Endpoint simplu pentru a testa rapid autentificarea Keycloak.
+    """
+    return {
+        "status": "success",
+        "message": "Autentificarea a funcționat perfect!",
+        "client_conectat": user_payload.get("azp", "Necunoscut")
+    }
+
+
+
 @app.get("/api/graph")
-async def get_graph_image():
+async def get_graph_image(user_payload: dict = Depends(verify_token)):
     """Returns the LangGraph architecture as a PNG image."""
     try:
         img_bytes = graph.get_graph().draw_mermaid_png()
@@ -51,17 +116,17 @@ async def get_graph_image():
 
 
 @app.post("/api/report")
-async def generate_financial_report(files: List[UploadFile] = File(...)):
-    """Upload one or more financial documents and generate a report.
+async def generate_financial_report(
+    files: List[UploadFile] = File(...),
+    user_payload: dict = Depends(verify_token)
+):
+    """Upload one or more financial documents and generate a report."""
 
-    Accepts multiple PDF, PNG, JPG, or WEBP files.
-    Each file is OCR'd, then all texts are sent to the LLM
-    to generate a comprehensive financial report.
-    """
+    print(f"[API] Apel efectuat de clientul: {user_payload.get('azp', 'Necunoscut')}")
+
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded.")
 
-    # Parse all uploaded files into base64 images
     all_document_images: list[str] = []
     filenames: list[str] = []
 
@@ -69,8 +134,7 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
         if file.content_type not in SUPPORTED_TYPES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Unsupported file type: {file.content_type} ({file.filename}). "
-                       f"Supported: PDF, PNG, JPG, WEBP"
+                detail=f"Unsupported file type: {file.content_type} ({file.filename}). Supported: PDF, PNG, JPG, WEBP"
             )
 
         file_bytes = await file.read()
@@ -99,7 +163,6 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
 
     print(f"[API] Processing {len(files)} file(s), {len(all_document_images)} page(s) total")
 
-    # Invoke the LangGraph pipeline
     try:
         result = graph.invoke({
             "documents": all_document_images,
@@ -122,7 +185,7 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
     if extracted and extracted[0] == "__INVALID_DOCUMENT__":
         return {
             "success": False,
-            "error": "The uploaded document does not appear to be a fiscal receipt or invoice. Please upload a valid receipt (bon fiscal, factură, etc.).",
+            "error": "The uploaded document does not appear to be a fiscal receipt or invoice. Please upload a valid receipt.",
             "pages_processed": len(all_document_images),
             "files": filenames,
             "expenses": {},
@@ -130,7 +193,6 @@ async def generate_financial_report(files: List[UploadFile] = File(...)):
     
     if extracted:
         exp = extracted[0]
-        # Concatenate invoice number + date for the response
         invoice_str = exp.invoice_number_date
         if exp.receipt_date:
             invoice_str = f"{invoice_str} / {exp.receipt_date}"
